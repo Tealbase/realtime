@@ -1,0 +1,20 @@
+{
+  "name": "tealbase-realtime-example",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "next",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "@tealbase/realtime-js": "^0.9.0",
+    "axios": "^0.19.1",
+    "dotenv": "^8.2.0",
+    "faker": "^4.1.0",
+    "next": "latest",
+    "pg": "^7.17.1",
+    "react": "^16.7.0",
+    "react-dom": "^16.7.0"
+  },
+  "license": "ISC"
+}
