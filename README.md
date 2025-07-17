@@ -111,6 +111,9 @@ We have set up some simple examples that show how to use this server:
 ## Client libraries
 
 - Javascript: [@tealbase/realtime-js](https://github.com/tealbase/realtime-js)
+- Python: [@tealbase/realtime-py](https://github.com/tealbase/realtime-py)
+- Dart: [@tealbase/realtime-dart](https://github.com/tealbase/realtime-dart)
+- C#: [@tealbase/realtime-csharp](https://github.com/tealbase/realtime-csharp) [WIP]
 
 
 ## Server
