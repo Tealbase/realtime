@@ -52,6 +52,14 @@ defmodule Realtime.Application do
       # Start the endpoint when the application starts
       RealtimeWeb.Endpoint,
       {
+        Phoenix.PubSub,
+        name: Realtime.PubSub, adapter: Phoenix.PubSub.PG2
+      },
+      {
+        Realtime.ConfigurationManager,
+        filename: configuration_file
+      },
+      {
         Realtime.Replication,
         # You can provide a different WAL position if desired, or default to
         # allowing Postgres to send you what it thinks you need
@@ -59,17 +67,7 @@ defmodule Realtime.Application do
         slot: slot_name,
         wal_position: {"0", "0"},
         publications: ["tealbase_realtime"]
-      },
-      {
-        Realtime.ConfigurationManager,
-        filename: configuration_file
-      },
-      Realtime.SubscribersNotification,
-      {
-        Realtime.Connectors,
-        config: nil
-      },
-      Realtime.WebhookConnector
+      }
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html

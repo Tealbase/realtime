@@ -1,6 +1,6 @@
 # tealbase Realtime
 
-> **⚠ WARNING: v0.10.0 Breaking Change **  
+> **⚠ WARNING: v0.10.0 Breaking Change **
 > Channels connections are secured by default in production. See [Channels Authorization](#channels-authorization) for more info.
 
 Listens to changes in a PostgreSQL Database and broadcasts them over websockets.
@@ -196,7 +196,7 @@ Verify JWT claims by setting JWT_CLAIM_VALIDATORS:
   >
   > Then JWT's "iss" value must equal "Issuer" and "nbf" value must equal 1610078130.
 
-**NOTE:** JWT expiration is checked automatically. 
+**NOTE:** JWT expiration is checked automatically.
 
 **Development**: Channels are not secure by default. Set SECURE_CHANNELS to `true` to test JWT verification locally.
 
@@ -237,6 +237,5 @@ This repo is licensed under Apache 2.0.
 
 We are building the features of Firebase using enterprise-grade, open source products. We support existing communities wherever possible, and if the products don’t exist we build them and open source them ourselves. Thanks to these sponsors who are making the OSS ecosystem better for everyone.
 
-[![Worklife VC](https://user-images.githubusercontent.com/10214025/90451355-34d71200-e11e-11ea-81f9-1592fd1e9146.png)](https://www.worklife.vc)
 [![New Sponsor](https://user-images.githubusercontent.com/10214025/90518111-e74bbb00-e198-11ea-8f88-c9e3c1aa4b5b.png)](https://github.com/sponsors/tealbase)
 
