@@ -4,44 +4,47 @@ on:
   push:
     branches:
       - master
+  workflow_dispatch:
 
 jobs:
   release:
     name: Release
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-18.04
 
     steps:
       - uses: actions/checkout@v2
 
+      # No easy way to check whether or not semantic-release released a new
+      # version, so we use artifacts as a workaround
       - name: Get version before
-        run: echo ::set-env name=VERSION_BEFORE::$(curl -s https://api.github.com/repos/supabase/realtime/releases/latest | jq .name -r)
+        run: echo $(curl --silent https://api.github.com/repos/supabase/realtime/releases/latest | jq .name --raw-output | cut -c 2-) > version-before
+
+      - uses: actions/upload-artifact@v2
+        with:
+          name: version-before
+          path: version-before
 
       - name: Release on GitHub
-        run: npx semantic-release -p        \
-          @semantic-release/commit-analyzer \
-          @semantic-release/github          \
-          @semantic-release/release-notes-generator
+        run: |
+          npx semantic-release --plugins              \
+            @semantic-release/commit-analyzer         \
+            @semantic-release/release-notes-generator \
+            @semantic-release/github
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # TODO: Race condition: GitHub may not update releases just in time before
+      # this step is invoked. Very unlikely to happen.
       - name: Get version after
-        run: echo ::set-env name=VERSION_AFTER::$(curl -s https://api.github.com/repos/supabase/realtime/releases/latest | jq .name -r)
+        run: echo $(curl --silent https://api.github.com/repos/supabase/realtime/releases/latest | jq .name --raw-output | cut -c 2-) > version-after
 
-      - name: Check version difference
-        run: |
-          if [ ${{ env.VERSION_BEFORE }} = ${{ env.VERSION_AFTER }} ]; then
-            echo 0 > has-new-release
-          else
-            echo 1 > has-new-release
-          fi
-
-      - uses: actions/upload-artifact@v1
+      - uses: actions/upload-artifact@v2
         with:
-          name: has-new-release
-          path: has-new-release
+          name: version-after
+          path: version-after
 
-  upload:
+  upload-x86_64:
     name: Upload / Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }}
 
     needs:
@@ -49,25 +52,26 @@ jobs:
 
     strategy:
       matrix:
-        elixir: ["1.10.x"]
-        otp: ["22.x"]
+        elixir: ["1.11.x"]
+        otp: ["23.x"]
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-18.04
 
     steps:
-      - uses: actions/download-artifact@v1
-        with:
-          name: has-new-release
+      - uses: actions/download-artifact@v2
 
       - name: Check for new release
-        run: echo ::set-env name=HAS_NEW_RELEASE::$(cat has-new-release/has-new-release)
+        run: |
+          echo VERSION_BEFORE=$(cat version-before/version-before) >> $GITHUB_ENV
+          echo VERSION_AFTER=$(cat version-after/version-after) >> $GITHUB_ENV
 
+      # No easy way to conditionally skip steps, so we use `if` as a workaround
       - uses: actions/checkout@v2
-        if: env.HAS_NEW_RELEASE == 1
+        if: env.VERSION_BEFORE != env.VERSION_AFTER
 
       - name: Cache Mix
-        if: env.HAS_NEW_RELEASE == 1
-        uses: actions/cache@v1
+        if: env.VERSION_BEFORE != env.VERSION_AFTER
+        uses: actions/cache@v2
         with:
           path: deps
           key: ${{ runner.os }}-mix-${{ hashFiles(format('{0}{1}', github.workspace, '/mix.lock')) }}
@@ -75,47 +79,126 @@ jobs:
             ${{ runner.os }}-mix-
 
       - name: Set up Elixir
-        if: env.HAS_NEW_RELEASE == 1
+        if: env.VERSION_BEFORE != env.VERSION_AFTER
         uses: actions/setup-elixir@v1
         with:
           elixir-version: ${{ matrix.elixir }}
           otp-version: ${{ matrix.otp }}
 
-      - name: Get version
-        if: env.HAS_NEW_RELEASE == 1
-        run: echo ::set-env name=VERSION::$(curl -s https://api.github.com/repos/supabase/realtime/releases/latest | jq .name -r)
-
       - name: Prepare release
-        if: env.HAS_NEW_RELEASE == 1
+        if: env.VERSION_BEFORE != env.VERSION_AFTER
         run: |
           cd server
+          sed -i "s/@version \".*\"/@version \"${{ env.VERSION_AFTER }}\"/" mix.exs
           mix deps.get
           mix compile
           mix release
-          tar -czf ../realtime-${{ env.VERSION }}-x86_64-linux-gnu.tar.gz -C ./_build/prod/rel realtime
+          tar -czf ../realtime-v${{ env.VERSION_AFTER }}-x86_64-linux-gnu.tar.gz -C ./_build/prod/rel realtime
         env:
           MIX_ENV: prod
 
       - name: Get upload url
-        if: env.HAS_NEW_RELEASE == 1
-        run: echo ::set-env name=UPLOAD_URL::$(curl -s https://api.github.com/repos/supabase/realtime/releases/latest | jq .upload_url -r)
+        if: env.VERSION_BEFORE != env.VERSION_AFTER
+        run: echo UPLOAD_URL=$(curl --silent https://api.github.com/repos/supabase/realtime/releases/latest | jq .upload_url --raw-output) >> $GITHUB_ENV
 
       - name: Upload release asset
-        if: env.HAS_NEW_RELEASE == 1
+        if: env.VERSION_BEFORE != env.VERSION_AFTER
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ env.UPLOAD_URL }}
-          asset_path: ./realtime-${{ env.VERSION }}-x86_64-linux-gnu.tar.gz
-          asset_name: realtime-${{ env.VERSION }}-x86_64-linux-gnu.tar.gz
+          asset_path: ./realtime-v${{ env.VERSION_AFTER }}-x86_64-linux-gnu.tar.gz
+          asset_name: realtime-v${{ env.VERSION_AFTER }}-x86_64-linux-gnu.tar.gz
           asset_content_type: application/gzip
 
+  upload-aarch64:
+    name: Build and upload arm64 binaries
+
+    needs:
+      - release
+
+    runs-on: ubuntu-18.04
+
+    steps:
+      - uses: actions/download-artifact@v2
+
+      - name: Check for new release
+        run: |
+          echo VERSION_BEFORE=$(cat version-before/version-before) >> $GITHUB_ENV
+          echo VERSION_AFTER=$(cat version-after/version-after) >> $GITHUB_ENV
+
+      - uses: actions/checkout@v2
+        if: env.VERSION_BEFORE != env.VERSION_AFTER
+
+      - uses: uraimo/run-on-arch-action@v2.0.5
+        if: env.VERSION_BEFORE != env.VERSION_AFTER
+        name: Build realtime for aarch64
+        id: runcmd
+        with:
+          arch: aarch64
+          distro: ubuntu18.04
+
+          run: |
+            export DEBIAN_FRONTEND=noninteractive
+            export MIX_ENV=prod
+            export LANG=C.UTF-8
+
+            apt-get update
+            apt-get -y install --no-install-recommends wget gnupg ca-certificates
+            wget https://packages.erlang-solutions.com/erlang-solutions_2.0_all.deb
+            dpkg -i erlang-solutions_2.0_all.deb
+            apt-get update
+            apt-get -y install --no-install-recommends esl-erlang=1:22.3.4.9-1 elixir=1.10.4-1
+
+            cd server
+            sed -i "s/@version \".*\"/@version \"${{ env.VERSION_AFTER }}\"/" mix.exs
+            mix local.hex --force
+            mix local.rebar --force
+            mix deps.get
+            mix deps.compile
+            mix release
+            tar -czf ../realtime-v${{ env.VERSION_AFTER }}-aarch64-linux-gnu.tar.gz -C ./_build/prod/rel realtime
+
+      - name: Get upload url
+        if: env.VERSION_BEFORE != env.VERSION_AFTER
+        run: echo UPLOAD_URL=$(curl --silent https://api.github.com/repos/supabase/realtime/releases/latest | jq .upload_url --raw-output) >> $GITHUB_ENV
+
+      - name: Upload release asset
+        if: env.VERSION_BEFORE != env.VERSION_AFTER
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ env.UPLOAD_URL }}
+          asset_path: ./realtime-v${{ env.VERSION_AFTER }}-aarch64-linux-gnu.tar.gz
+          asset_name: realtime-v${{ env.VERSION_AFTER }}-aarch64-linux-gnu.tar.gz
+          asset_content_type: application/gzip
+
+  upload-docker:
+    name: Upload Docker image
+
+    needs:
+      - release
+
+    runs-on: ubuntu-18.04
+
+    steps:
+      - uses: actions/download-artifact@v2
+
+      - name: Check for new release
+        run: |
+          echo VERSION_BEFORE=$(cat version-before/version-before) >> $GITHUB_ENV
+          echo VERSION_AFTER=$(cat version-after/version-after) >> $GITHUB_ENV
+
+      - uses: actions/checkout@v2
+        if: env.VERSION_BEFORE != env.VERSION_AFTER
+
       - name: Upload build to Docker Hub
-        if: env.HAS_NEW_RELEASE == 1
+        if: env.VERSION_BEFORE != env.VERSION_AFTER
         uses: docker/build-push-action@v1
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
           repository: supabase/realtime
-          tags: latest,${{ env.VERSION }}
+          tags: latest,v${{ env.VERSION_AFTER }}
