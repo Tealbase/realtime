@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "@tealbase/realtime-js": "^2.1.0"
+  }
+}
