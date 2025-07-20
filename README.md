@@ -2,10 +2,7 @@
 <p align="center">
   <a href="https://tealbase.io">
         <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/tealbase/tealbase/master/packages/common/assets/images/tealbase-logo-wordmark--dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/tealbase/tealbase/master/packages/common/assets/images/tealbase-logo-wordmark--light.svg">
-      <img alt="tealbase Logo" width="300" src="https://raw.githubusercontent.com/tealbase/tealbase/master/packages/common/assets/images/logo-preview.jpg">
-    </picture>
+      <img width="581" height="113" alt="tealbase" src="https://github.com/user-attachments/assets/53f4d27f-5d25-4d6c-aa58-2714e88679bc" />
   </a>
 
   <h1 align="center">tealbase Realtime</h1>
