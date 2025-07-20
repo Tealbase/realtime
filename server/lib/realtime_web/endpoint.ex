@@ -2,7 +2,9 @@ defmodule RealtimeWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :realtime
 
   socket "/socket", RealtimeWeb.UserSocket,
-    websocket: true,
+    websocket: [
+      connect_info: [:x_headers]
+    ],
     longpoll: false
 
   # Serve at "/" the static files from "priv/static" directory.
@@ -21,6 +23,10 @@ defmodule RealtimeWeb.Endpoint do
     socket "/phoenix/live_reload/socket", Phoenix.LiveReloader.Socket
     plug Phoenix.LiveReloader
     plug Phoenix.CodeReloader
+  end
+
+  if Application.fetch_env!(:realtime, :expose_metrics) do
+    plug PromEx.Plug, prom_ex_module: Realtime.Metrics.PromEx
   end
 
   plug Plug.RequestId

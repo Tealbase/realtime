@@ -3,6 +3,14 @@ defmodule RealtimeWeb.UserSocket do
 
   alias RealtimeWeb.ChannelsAuthorization
 
+  defoverridable init: 1
+
+  def init(state) do
+    res = {:ok, {_, socket}} = super(state)
+    Realtime.Metrics.SocketMonitor.track_socket(socket)
+    res
+  end
+
   ## Channels
   channel "realtime:*", RealtimeWeb.RealtimeChannel
 
@@ -17,11 +25,33 @@ defmodule RealtimeWeb.UserSocket do
   #
   # See `Phoenix.Token` documentation for examples in
   # performing token verification on connect.
-  def connect(params, socket) do
-    case Application.fetch_env!(:realtime, :secure_channels)
-         |> authorize_conn(params) do
-      :ok -> {:ok, socket}
-      _ -> :error
+  def connect(params, socket, %{x_headers: headers}) do
+    if Application.fetch_env!(:realtime, :secure_channels) do
+      token = access_token(headers, params)
+
+      case ChannelsAuthorization.authorize(token) do
+        {:ok, _} -> {:ok, assign(socket, :access_token, token)}
+        _ -> :error
+      end
+    else
+      {:ok, socket}
+    end
+  end
+
+  @spec access_token([{String.t(), String.t()}], map) :: String.t() | nil
+  def access_token(headers, params) do
+    case :proplists.get_value("x-api-key", headers, nil) do
+      nil ->
+        # WARNING: "token" and "apikey" param keys will be deprecated.
+        # Please use "x-api-key" header param key to pass in auth token.
+        case params do
+          %{"apikey" => token} -> token
+          %{"token" => token} -> token
+          _ -> nil
+        end
+
+      token ->
+        token
     end
   end
 
@@ -36,23 +66,4 @@ defmodule RealtimeWeb.UserSocket do
   #
   # Returning `nil` makes this socket anonymous.
   def id(_socket), do: nil
-
-  defp authorize_conn(true, %{"token" => token}) do
-    # WARNING: "token" param key will be deprecated.
-    # Please use "apikey" param key to pass in auth token.
-    case ChannelsAuthorization.authorize(token) do
-      {:ok, _} -> :ok
-      _ -> :error
-    end
-  end
-
-  defp authorize_conn(true, %{"apikey" => token}) do
-    case ChannelsAuthorization.authorize(token) do
-      {:ok, _} -> :ok
-      _ -> :error
-    end
-  end
-
-  defp authorize_conn(true, _params), do: :error
-  defp authorize_conn(false, _params), do: :ok
 end

@@ -1,4 +1,4 @@
-use Mix.Config
+import Config
 
 # For production, don't forget to configure the url host
 # to something meaningful, Phoenix uses this information
@@ -10,13 +10,12 @@ use Mix.Config
 # which you should run after static files are built and
 # before starting your production server.
 config :realtime, RealtimeWeb.Endpoint,
+  check_origin: false,
   load_from_system_env: true,
-  url: [host: Application.get_env(:demo, :app_hostname), port: Application.get_env(:demo, :app_port)]
+  server: true
 
 # Do not print debug messages in production
 config :logger, level: :info
-
-config :realtime, RealtimeWeb.Endpoint, server: true
 
 # ## SSL Support
 #
