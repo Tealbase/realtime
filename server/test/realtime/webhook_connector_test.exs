@@ -5,7 +5,7 @@ defmodule Realtime.WebhookConnectorTest do
 
   alias Realtime.Adapters.Changes.Transaction
   alias Realtime.Configuration.{Webhook, WebhookEndpoint}
-  alias Realtime.Decoder.Messages.Relation.Column
+  alias Realtime.Adapters.Postgres.Decoder.Messages.Relation.Column
   alias Realtime.WebhookConnector
 
   @test_endpoint "https://webhooktest.site"
@@ -86,7 +86,7 @@ defmodule Realtime.WebhookConnectorTest do
       config: %WebhookEndpoint{}
     }
   ]
-  @request_headers [{"Content-Type", "application/json"}]
+  @request_headers [{"content-type", "application/json"}]
 
   test "notify/1 when webhook POST requests are successful" do
     with_mock HTTPoison,

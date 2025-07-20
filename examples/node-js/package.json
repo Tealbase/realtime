@@ -7,7 +7,7 @@
     "start": "forever -w --minUptime 2000 --spinSleepTime 2000 src/server.js"
   },
   "dependencies": {
-    "@tealbase/realtime-js": "^0.9.0",
-    "forever": "^3.0.0"
+    "@tealbase/realtime-js": "^1.7.2",
+    "forever": "^4.0.3"
   }
 }

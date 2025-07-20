@@ -12,7 +12,9 @@ defmodule Realtime.MixProject do
       elixirc_paths: elixirc_paths(Mix.env()),
       compilers: [:phoenix, :gettext] ++ Mix.compilers(),
       start_permanent: Mix.env() == :prod,
-      deps: deps()
+      aliases: aliases(),
+      deps: deps(),
+      dialyzer: dialyzer()
     ]
   end
 
@@ -35,6 +37,8 @@ defmodule Realtime.MixProject do
   # Type `mix help deps` for examples and options.
   defp deps do
     [
+      {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.0", only: [:dev], runtime: false},
       {:phoenix, "~> 1.5"},
       {:phoenix_pubsub, "~> 2.0"},
       {:phoenix_html, "~> 2.14"},
@@ -44,9 +48,31 @@ defmodule Realtime.MixProject do
       {:jason, "~> 1.2.2"},
       {:joken, "~> 2.3.0"},
       {:plug_cowboy, "~> 2.4"},
-      {:epgsql, "~> 4.5"},
+      {:epgsql, "~> 4.6.0"},
       {:timex, "~> 3.0"},
+      {:retry, "~> 0.14.1"},
+      {:ecto_sql, "~> 3.0"},
+      {:postgrex, "~> 0.15.10"},
+      {:prom_ex, "~> 1.3.0"},
       {:mock, "~> 0.3.0", only: :test}
+    ]
+  end
+
+  defp dialyzer do
+    [
+      plt_core_path: "priv/plts",
+      plt_file: {:no_warn, "priv/plts/dialyzer.plt"}
+    ]
+  end
+
+  defp aliases do
+    [
+      test: [
+        "ecto.create --quiet",
+        "ecto.load -d 'test/setup.sql' -f",
+        "ecto.migrate --prefix realtime --quiet",
+        "test"
+      ]
     ]
   end
 end

@@ -1,20 +1,9 @@
 # ---- Build Stage ----
-FROM elixir:1.9.4 AS app_builder
+FROM elixir:1.11.4 AS app_builder
 
 # Set environment variables for building the application
 ENV MIX_ENV=prod \
-    TEST=1 \
-    LANG=C.UTF-8 \
-    DB_HOST=localhost \
-    DB_NAME=postgres \
-    DB_USER=postgres \
-    DB_PASSWORD=postgres \
-    DB_PORT=5432 \
-    MIX_ENV=prod \
-    PORT=4000 \
-    HOSTNAME=localhost \
-    JWT_SECRET=SOMETHING_SUPER_SECRET \
-    SECURE_CHANNELS=true
+    DB_SSL=false
 
 RUN apt-get update
 
@@ -53,8 +42,11 @@ RUN apt-get update && \
 # RUN adduser -D -h /home/app app
 # WORKDIR /home/app
 COPY --from=app_builder /app/_build .
+COPY docker-entrypoint.sh .
 # RUN chown -R app: ./prod
 # USER app
+
+ENTRYPOINT ["/docker-entrypoint.sh"]
 
 # Run the Phoenix app
 CMD ["./prod/rel/realtime/bin/realtime", "start"]
