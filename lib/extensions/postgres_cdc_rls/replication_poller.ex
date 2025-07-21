@@ -12,8 +12,9 @@ defmodule Extensions.PostgresCdcRls.ReplicationPoller do
 
   alias Extensions.PostgresCdcRls.{Replications, MessageDispatcher}
   alias DBConnection.Backoff
-
   alias Realtime.PubSub
+  alias Realtime.GenCounter
+  alias Realtime.Tenants
 
   alias Realtime.Adapters.Changes.{
     DeletedRecord,
@@ -151,10 +152,7 @@ defmodule Extensions.PostgresCdcRls.ReplicationPoller do
 
         {:noreply, %{state | backoff: backoff, poll_ref: poll_ref}}
 
-      {:error,
-       %Postgrex.Error{
-         postgres: %{code: :object_in_use, routine: "ReplicationSlotAcquire", message: msg}
-       }} ->
+      {:error, %Postgrex.Error{postgres: %{code: :object_in_use, message: msg}}} ->
         Logger.error("Error polling replication: :object_in_use")
 
         [_, db_pid] = Regex.run(~r/PID\s(\d*)$/, msg)
