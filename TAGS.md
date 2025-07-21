@@ -33,3 +33,7 @@ Here are the tags that exist in my fork but not in the upstream repository:
 | v1.0.0 | b6f9301cbf50faf55c929fe00733dcca74092664 | v1.0.0 |
 | v2.0.0 | b4d9b0dbb18f05ed9d665b17ad31675263bc5ea3 | Merge branch 'Tealbase:main' into main |
 | v2.1.0 | 1290bd40f7abdf89fb5146438c7c7e8f53733758 | v2.1.0 |
+| v2.2.0 | 6b50011b0518d2e469d5ec17dcca504e40acecde | v2.2.0 |
+| v2.3.0 | 68fa68738e5d8d556d09dc6e1e99cdcc62df8967 | v2.3.0 |
+| v2.4.0 | 7622c95761f9a63c79a769aa33fc4b2e3273d76b | v2.4.0 |
+| v2.5.0 | 49453d2b93eac0b80e335f667cc17f10c5760ca3 | feat: v2.5.0 |
