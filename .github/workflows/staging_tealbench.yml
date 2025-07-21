@@ -23,9 +23,9 @@ jobs:
           args: "-c deploy/fly/qa.toml scale count 0"
       - name: Get PR into variable
         run: echo "PR_NUM=$(git show -s --format=%s | grep -Po '(?<=#)[0-9]*')" >> $GITHUB_ENV
-      - name: Start Tealbench
+      - name: Start tealbench
         run: |
           curl --request POST \
-          --url https://Tealbench.fly.dev/api/runs \
+          --url https://tealbench.fly.dev/api/runs \
           --header 'Authorization: User ${{ secrets.BENCHMARK_JWT }}' \
-          --data '{"benchmark_id":"SyMKxU3TOiWcAvU","name":"PR ${{ env.PR_NUM }}","comment": "https://github.com/Tealbase/realtime/pull/${{ env.PR_NUM }}", "origin":"main"}'
+          --data '{"benchmark_id":"SyMKxU3TOiWcAvU","name":"PR ${{ env.PR_NUM }}","comment": "https://github.com/tealbase/realtime/pull/${{ env.PR_NUM }}", "origin":"main"}'
