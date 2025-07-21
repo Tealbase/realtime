@@ -1,4 +1,4 @@
-name: MT Tealbench
+name: Tealbench
 on:
   push:
     branches:
@@ -28,4 +28,4 @@ jobs:
           curl --request POST \
           --url https://Tealbench.fly.dev/api/runs \
           --header 'Authorization: User ${{ secrets.BENCHMARK_JWT }}' \
-          --data '{"benchmark_id":"SyMKxU3TOiWcAvU","name":"PR ${{ env.PR_NUM }}","comment": "https://github.com/supabase/realtime/pull/${{ env.PR_NUM }}", "origin":"main"}'
+          --data '{"benchmark_id":"SyMKxU3TOiWcAvU","name":"PR ${{ env.PR_NUM }}","comment": "https://github.com/Tealbase/realtime/pull/${{ env.PR_NUM }}", "origin":"main"}'

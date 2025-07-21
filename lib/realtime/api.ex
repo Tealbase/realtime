@@ -6,7 +6,7 @@ defmodule Realtime.Api do
 
   import Ecto.Query
 
-  alias Realtime.{Repo, Api.Tenant, Api.Extensions, RateCounter, GenCounter}
+  alias Realtime.{Repo, Api.Tenant, Api.Extensions, RateCounter, GenCounter, Tenants}
 
   @doc """
   Returns the list of tenants.
@@ -28,7 +28,7 @@ defmodule Realtime.Api do
   def list_tenants(opts) when is_list(opts) do
     repo_replica = Repo.replica()
 
-    field = Keyword.get(opts, :sort_by, "inserted_at") |> String.to_atom()
+    field = Keyword.get(opts, :order_by, "inserted_at") |> String.to_atom()
     external_id = Keyword.get(opts, :search)
     limit = Keyword.get(opts, :limit, 50)
     order = Keyword.get(opts, :order, "desc") |> String.to_atom()
@@ -178,7 +178,7 @@ defmodule Realtime.Api do
   end
 
   def preload_counters(%Tenant{} = tenant) do
-    id = {:plug, :requests, tenant.external_id}
+    id = Tenants.requests_per_second_key(tenant)
 
     preload_counters(tenant, id)
   end
