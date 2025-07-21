@@ -1,6 +1,8 @@
 defmodule Realtime.PostgresCdc do
   @moduledoc false
 
+  require Logger
+
   @timeout 10_000
   @extensions Application.compile_env(:realtime, :extensions)
 
@@ -62,8 +64,8 @@ defmodule Realtime.PostgresCdc do
   def aws_to_fly(aws_region) when is_binary(aws_region) do
     case aws_region do
       "us-east-1" -> "iad"
-      "us-west-1" -> "sjc"
-      "sa-east-1" -> "gru"
+      "us-west-1" -> "sea"
+      "sa-east-1" -> "iad"
       "ca-central-1" -> "iad"
       "ap-southeast-1" -> "sin"
       "ap-northeast-1" -> "sin"
@@ -73,14 +75,50 @@ defmodule Realtime.PostgresCdc do
       "eu-west-1" -> "lhr"
       "eu-west-2" -> "lhr"
       "eu-west-3" -> "lhr"
-      "eu-central-1" -> "fra"
+      "eu-central-1" -> "lhr"
       _ -> nil
     end
   end
 
-  @spec region_nodes(String.t()) :: [{pid, any}]
+  @doc """
+  Lists the nodes in a region. Sorts by node name in case the list order
+  is unstable.
+  """
+
+  @spec region_nodes(String.t()) :: [atom()]
   def region_nodes(region) when is_binary(region) do
     :syn.members(RegionNodes, region)
+    |> Enum.map(fn {_pid, [node: node]} -> node end)
+    |> Enum.sort()
+  end
+
+  @doc """
+  Picks the node to launch the Postgres connection on.
+
+  If there are not two nodes in a region the connection is established from
+  the `default` node given.
+  """
+
+  @spec launch_node(String.t(), String.t(), atom()) :: atom()
+  def launch_node(tenant, fly_region, default) do
+    case region_nodes(fly_region) do
+      [node] ->
+        Logger.warning(
+          "Only one region node (#{inspect(node)}) for #{fly_region} using default #{inspect(default)}"
+        )
+
+        default
+
+      [] ->
+        Logger.warning("Zero region nodes for #{fly_region} using #{inspect(default)}")
+        default
+
+      regions_nodes ->
+        member_count = Enum.count(regions_nodes)
+        index = :erlang.phash2(tenant, member_count)
+
+        Enum.at(regions_nodes, index)
+    end
   end
 
   @callback handle_connect(any()) :: {:ok, pid()} | {:error, any()}

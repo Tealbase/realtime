@@ -30,7 +30,7 @@ import WaitlistPopover from '../components/WaitlistPopover'
 import DarkModeToggle from '../components/DarkModeToggle'
 
 const LATENCY_THRESHOLD = 400
-const MAX_ROOM_USERS = 5
+const MAX_ROOM_USERS = 50
 const MAX_DISPLAY_MESSAGES = 50
 const MAX_EVENTS_PER_SECOND = 10
 const X_THRESHOLD = 25
@@ -256,20 +256,21 @@ const Room: NextPage = () => {
 
           if (resp !== 'ok') {
             console.log('pingChannel broadcast error')
-            return
-          }
+            setLatency(-1)
+          } else {
+            const end = performance.now()
+            const newLatency = end - start
 
-          const end = performance.now()
+            if (newLatency >= LATENCY_THRESHOLD) {
+              sendLog(
+                `Roundtrip Latency for User ${userId} surpassed ${LATENCY_THRESHOLD} ms at ${newLatency.toFixed(
+                  1
+                )} ms`
+              )
+            }
 
-          const newLatency: number = end - start
-          if (latency > 0 && latency < LATENCY_THRESHOLD && newLatency >= LATENCY_THRESHOLD) {
-            sendLog(
-              `Roundtrip Latency for User ${userId} surpassed ${LATENCY_THRESHOLD} ms at ${newLatency.toFixed(
-                1
-              )} ms`
-            )
+            setLatency(newLatency)
           }
-          setLatency(newLatency)
         }, 1000)
       }
     })

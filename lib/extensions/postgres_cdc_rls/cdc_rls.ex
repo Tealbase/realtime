@@ -68,7 +68,7 @@ defmodule Extensions.PostgresCdcRls do
 
   def start_distributed(%{"region" => region, "id" => tenant} = args) do
     fly_region = PostgresCdc.aws_to_fly(region)
-    launch_node = launch_node(tenant, fly_region, node())
+    launch_node = PostgresCdc.launch_node(tenant, fly_region, node())
 
     Logger.warning(
       "Starting distributed postgres extension #{inspect(lauch_node: launch_node, region: region, fly_region: fly_region)}"
@@ -136,20 +136,6 @@ defmodule Extensions.PostgresCdcRls do
     end
   end
 
-  def launch_node(tenant, fly_region, default) do
-    case PostgresCdc.region_nodes(fly_region) do
-      [_ | _] = regions_nodes ->
-        member_count = Enum.count(regions_nodes)
-        index = :erlang.phash2(tenant, member_count)
-        {_, [node: launch_node]} = Enum.at(regions_nodes, index)
-        launch_node
-
-      _ ->
-        Logger.warning("Didn't find launch_node, return default #{inspect(default)}")
-        default
-    end
-  end
-
   def create_subscription(conn, publication, opts, timeout \\ 5_000) do
     conn_node = node(conn)
 
@@ -171,8 +157,16 @@ defmodule Extensions.PostgresCdcRls do
 
   @spec update_meta(String.t(), pid(), pid()) :: {:ok, {pid(), term()}} | {:error, term()}
   def update_meta(tenant, manager_pid, subs_pool) do
-    :syn.update_registry(__MODULE__, tenant, fn _, meta ->
-      %{meta | manager: manager_pid, subs_pool: subs_pool}
+    :syn.update_registry(__MODULE__, tenant, fn pid, meta ->
+      if node(pid) == node(manager_pid) do
+        %{meta | manager: manager_pid, subs_pool: subs_pool}
+      else
+        Logger.error(
+          "Node mismatch for tenant #{tenant} #{inspect(node(pid))} #{inspect(node(manager_pid))}"
+        )
+
+        meta
+      end
     end)
   end
 end

@@ -50,6 +50,7 @@ defmodule RealtimeWeb.Router do
     end
 
     live "/", AdminLive.Index, :index
+    live "/tenants", TenantsLive.Index, :index
   end
 
   # get "/metrics/:id", RealtimeWeb.TenantMetricsController, :index
@@ -116,7 +117,8 @@ defmodule RealtimeWeb.Router do
         Realtime.Repo,
         Realtime.Repo.Replica.FRA,
         Realtime.Repo.Replica.IAD,
-        Realtime.Repo.Replica.SIN
+        Realtime.Repo.Replica.SIN,
+        Realtime.Repo.Replica.SJC
       ],
       ecto_psql_extras_options: [long_running_queries: [threshold: "200 milliseconds"]],
       metrics: RealtimeWeb.Telemetry

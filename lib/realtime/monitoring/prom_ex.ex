@@ -1,5 +1,9 @@
 defmodule Realtime.PromEx do
-  alias Realtime.PromEx.Plugins.{OsMon, Phoenix, Tenants}
+  alias Realtime.PromEx.Plugins.{OsMon, Phoenix, Tenants, Tenant}
+
+  import Realtime.Helpers, only: [short_node_id: 0]
+
+  import Realtime.Helpers, only: [short_node_id: 0]
 
   @moduledoc """
   Be sure to add the following to finish setting up PromEx:
@@ -71,7 +75,8 @@ defmodule Realtime.PromEx do
       # Plugins.Oban,
       # Plugins.PhoenixLiveView
       {OsMon, poll_rate: poll_rate},
-      {Tenants, poll_rate: poll_rate}
+      {Tenants, poll_rate: poll_rate},
+      {Tenant, poll_rate: poll_rate}
     ]
   end
 
@@ -137,18 +142,10 @@ defmodule Realtime.PromEx do
   def set_metrics_tags() do
     [_, node_host] = node() |> Atom.to_string() |> String.split("@")
 
-    fly_alloc_id = Application.get_env(:realtime, :fly_alloc_id)
-
-    short_alloc_id =
-      case String.split(fly_alloc_id, "-", parts: 2) do
-        [short_alloc_id, _] -> short_alloc_id
-        _ -> fly_alloc_id
-      end
-
     metrics_tags = %{
       region: Application.get_env(:realtime, :fly_region),
       node_host: node_host,
-      short_alloc_id: short_alloc_id
+      short_alloc_id: short_node_id()
     }
 
     Application.put_env(:realtime, :metrics_tags, metrics_tags)
