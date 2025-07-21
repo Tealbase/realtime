@@ -3,20 +3,19 @@ defmodule Realtime.Repo do
     otp_app: :realtime,
     adapter: Ecto.Adapters.Postgres
 
-  @name nil
-  @pool_size 2
-
   @replicas %{
-    "fra" => Realtime.Repo.Replica.FRA,
+    "sjc" => Realtime.Repo.Replica.IAD,
     "gru" => Realtime.Repo.Replica.IAD,
     "iad" => Realtime.Repo.Replica.IAD,
-    "sin" => Realtime.Repo.Replica.SIN
+    "sin" => Realtime.Repo.Replica.SIN,
+    "maa" => Realtime.Repo.Replica.SIN,
+    "lhr" => Realtime.Repo.Replica.FRA,
+    "fra" => Realtime.Repo.Replica.FRA
   }
 
-  def with_dynamic_repo(credentials, callback) do
+  def with_dynamic_repo(config, callback) do
     default_dynamic_repo = get_dynamic_repo()
-    start_opts = [name: @name, pool_size: @pool_size] ++ credentials
-    {:ok, repo} = Realtime.Repo.start_link(start_opts)
+    {:ok, repo} = [name: nil, pool_size: 1] |> Keyword.merge(config) |> Realtime.Repo.start_link()
 
     try do
       Realtime.Repo.put_dynamic_repo(repo)
@@ -39,8 +38,8 @@ defmodule Realtime.Repo do
         )
   end
 
-  for {_, repo} <- @replicas do
-    defmodule repo do
+  for replica_repo <- @replicas |> Map.values() |> Enum.uniq() do
+    defmodule replica_repo do
       use Ecto.Repo,
         otp_app: :realtime,
         adapter: Ecto.Adapters.Postgres,
