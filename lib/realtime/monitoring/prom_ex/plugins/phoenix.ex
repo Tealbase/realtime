@@ -55,17 +55,12 @@ if Code.ensure_loaded?(Phoenix) do
       )
     end
 
-    def execute_metrics() do
+    def execute_metrics do
       active_conn =
-        case :ets.lookup(:ranch_server, {:listener_sup, HTTP}) do
-          [] ->
-            -1
-
-          _ ->
-            HTTP
-            |> :ranch_server.get_connections_sup()
-            |> :supervisor.count_children()
-            |> Keyword.get(:active)
+        if :ranch.info()[HTTP] do
+          :ranch.info(HTTP)[:active_connections]
+        else
+          -1
         end
 
       :telemetry.execute(@event_all_connections, %{active: active_conn}, %{})
@@ -123,8 +118,7 @@ if Code.ensure_loaded?(Phoenix) do
             metric_prefix ++ [:socket, :connected, :duration, :milliseconds],
             event_name: [:phoenix, :socket_connected],
             measurement: :duration,
-            description:
-              "The time it takes for the application to establish a socket connection.",
+            description: "The time it takes for the application to establish a socket connection.",
             reporter_options: [
               buckets: [10, 100, 500, 1_000, 5_000, 10_000]
             ],

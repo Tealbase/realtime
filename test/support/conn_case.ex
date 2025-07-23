@@ -21,9 +21,16 @@ defmodule RealtimeWeb.ConnCase do
   using do
     quote do
       # Import conveniences for testing with connections
-      import Plug.Conn
+      import Generators
+      import TenantConnection
       import Phoenix.ConnTest
+      import Plug.Conn
+      import Realtime.DataCase
+
       alias RealtimeWeb.Router.Helpers, as: Routes
+
+      use RealtimeWeb, :verified_routes
+      use Realtime.Tracing
 
       # The default endpoint for testing
       @endpoint RealtimeWeb.Endpoint
@@ -31,11 +38,8 @@ defmodule RealtimeWeb.ConnCase do
   end
 
   setup tags do
-    :ok = Sandbox.checkout(Realtime.Repo)
-
-    unless tags[:async] do
-      Sandbox.mode(Realtime.Repo, {:shared, self()})
-    end
+    pid = Sandbox.start_owner!(Realtime.Repo, shared: not tags[:async])
+    on_exit(fn -> Sandbox.stop_owner(pid) end)
 
     {:ok, conn: Phoenix.ConnTest.build_conn()}
   end

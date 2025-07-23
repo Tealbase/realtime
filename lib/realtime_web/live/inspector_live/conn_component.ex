@@ -8,16 +8,34 @@ defmodule RealtimeWeb.InspectorLive.ConnComponent do
     schema "f" do
       field(:log_level, :string, default: "error")
       field(:token, :string)
-      field(:path, :string)
+      field(:host, :string)
       field(:project, :string)
       field(:channel, :string, default: "room_a")
       field(:schema, :string, default: "public")
       field(:table, :string, default: "*")
+      field(:filter, :string)
+      field(:bearer, :string)
+      field(:enable_broadcast, :boolean, default: true)
+      field(:enable_presence, :boolean, default: false)
+      field(:enable_db_changes, :boolean, default: false)
     end
 
     def changeset(form, params \\ %{}) do
       form
-      |> cast(params, [:log_level, :token, :path, :project, :channel, :schema, :table])
+      |> cast(params, [
+        :log_level,
+        :token,
+        :host,
+        :project,
+        :channel,
+        :schema,
+        :table,
+        :filter,
+        :bearer,
+        :enable_broadcast,
+        :enable_presence,
+        :enable_db_changes
+      ])
       |> validate_required([:channel])
     end
   end
@@ -47,7 +65,7 @@ defmodule RealtimeWeb.InspectorLive.ConnComponent do
   @impl true
   def handle_event(
         "validate",
-        %{"_target" => ["connection", "path"], "connection" => conn},
+        %{"_target" => ["connection", "host"], "connection" => conn},
         socket
       ) do
     conn = Map.drop(conn, ["project"])
@@ -70,9 +88,9 @@ defmodule RealtimeWeb.InspectorLive.ConnComponent do
         %{"_target" => ["connection", "project"], "connection" => %{"project" => project} = conn},
         socket
       ) do
-    ws_url = "wss://#{project}.tealbase.co/realtime/v1"
+    host = "https://#{project}.tealbase.co"
 
-    conn = conn |> Map.put("path", ws_url) |> Map.put("project", project)
+    conn = conn |> Map.put("host", host) |> Map.put("project", project)
 
     changeset = Connection.changeset(%Connection{}, conn)
 
@@ -142,10 +160,14 @@ defmodule RealtimeWeb.InspectorLive.ConnComponent do
         "local_storage",
         %{
           "channel" => nil,
-          "path" => nil,
+          "host" => nil,
           "schema" => nil,
           "table" => nil,
-          "token" => nil
+          "token" => nil,
+          "filter" => nil,
+          "bearer" => nil,
+          "enable_presence" => nil,
+          "enable_db_changes" => nil
         },
         socket
       ) do

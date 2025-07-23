@@ -1,134 +1,214 @@
 defmodule RealtimeWeb.RealtimeChannelTest do
-  use ExUnit.Case, async: false
-  use RealtimeWeb.ChannelCase
+  # Can't run async true because under the hood Cachex is used and it doesn't see Ecto Sandbox
+  use RealtimeWeb.ChannelCase, async: false
 
-  import Mock
+  import ExUnit.CaptureLog
 
   alias Phoenix.Socket
-  alias RealtimeWeb.{ChannelsAuthorization, Joken.CurrentTime, UserSocket}
-
-  @tenant "dev_tenant"
+  alias RealtimeWeb.Joken.CurrentTime
+  alias RealtimeWeb.UserSocket
 
   @default_limits %{
     max_concurrent_users: 200,
     max_events_per_second: 100,
-    max_joins_per_second: 500,
+    max_joins_per_second: 100,
     max_channels_per_client: 100,
     max_bytes_per_second: 100_000
   }
-
   setup do
-    {:ok, _pid} = start_supervised(CurrentTime.Mock)
-    :ok
+    start_supervised!(CurrentTime.Mock)
+    tenant = Containers.checkout_tenant(run_migrations: true)
+    {:ok, tenant: tenant}
   end
 
   describe "maximum number of connected clients per tenant" do
-    test "not reached" do
-      with_mocks([
-        {ChannelsAuthorization, [],
-         [
-           authorize_conn: fn _, _ ->
-             {:ok, %{"exp" => Joken.current_time() + 1_000, "role" => "postgres"}}
-           end
-         ]}
-      ]) do
-        {:ok, %Socket{} = socket} =
-          connect(UserSocket, %{}, %{
-            uri: %{host: "#{@tenant}.localhost:4000/socket/websocket", query: ""},
-            x_headers: [{"x-api-key", "token123"}]
-          })
+    test "not reached", %{tenant: tenant} do
+      jwt = Generators.generate_jwt_token(tenant)
+      {:ok, %Socket{} = socket} = connect(UserSocket, %{"log_level" => "warning"}, conn_opts(tenant, jwt))
 
-        socket = Socket.assign(socket, %{limits: %{@default_limits | max_concurrent_users: 1}})
-        assert {:ok, _, %Socket{}} = subscribe_and_join(socket, "realtime:test", %{})
-      end
+      socket = Socket.assign(socket, %{limits: %{@default_limits | max_concurrent_users: 1}})
+      assert {:ok, _, %Socket{}} = subscribe_and_join(socket, "realtime:test", %{})
     end
 
-    test "reached" do
-      with_mocks([
-        {ChannelsAuthorization, [],
-         [
-           authorize_conn: fn _, _ ->
-             {:ok, %{"exp" => Joken.current_time() + 1_000, "role" => "postgres"}}
-           end
-         ]}
-      ]) do
-        {:ok, %Socket{} = socket} =
-          connect(UserSocket, %{}, %{
-            uri: %{host: "#{@tenant}.localhost:4000/socket/websocket", query: ""},
-            x_headers: [{"x-api-key", "token123"}]
-          })
+    test "reached", %{tenant: tenant} do
+      jwt = Generators.generate_jwt_token(tenant)
+      {:ok, %Socket{} = socket} = connect(UserSocket, %{"log_level" => "warning"}, conn_opts(tenant, jwt))
 
-        socket_at_capacity =
-          Socket.assign(socket, %{limits: %{@default_limits | max_concurrent_users: 0}})
+      socket_at_capacity =
+        Socket.assign(socket, %{limits: %{@default_limits | max_concurrent_users: 0}})
 
-        socket_over_capacity =
-          Socket.assign(socket, %{limits: %{@default_limits | max_concurrent_users: -1}})
+      socket_over_capacity =
+        Socket.assign(socket, %{limits: %{@default_limits | max_concurrent_users: -1}})
 
-        assert {:error, %{reason: "{:error, :too_many_connections}"}} =
-                 subscribe_and_join(socket_at_capacity, "realtime:test", %{})
+      assert {:error, %{reason: "Too many connected users"}} =
+               subscribe_and_join(socket_at_capacity, "realtime:test", %{})
 
-        assert {:error, %{reason: "{:error, :too_many_connections}"}} =
-                 subscribe_and_join(socket_over_capacity, "realtime:test", %{})
-      end
+      assert {:error, %{reason: "Too many connected users"}} =
+               subscribe_and_join(socket_over_capacity, "realtime:test", %{})
     end
   end
 
-  describe "token expiration" do
-    test "valid" do
-      with_mocks([
-        {ChannelsAuthorization, [],
-         [
-           authorize_conn: fn _, _ ->
-             {:ok, %{"exp" => Joken.current_time() + 1, "role" => "postgres"}}
-           end
-         ]}
-      ]) do
-        {:ok, %Socket{} = socket} =
-          connect(UserSocket, %{}, %{
-            uri: %{host: "#{@tenant}.localhost:4000/socket/websocket", query: ""},
-            x_headers: [{"x-api-key", "token123"}]
-          })
+  describe "JWT token validations" do
+    test "token has valid expiration", %{tenant: tenant} do
+      jwt = Generators.generate_jwt_token(tenant)
+      {:ok, %Socket{} = socket} = connect(UserSocket, %{"log_level" => "warning"}, conn_opts(tenant, jwt))
 
-        assert {:ok, _, %Socket{}} = subscribe_and_join(socket, "realtime:test", %{})
-      end
+      assert {:ok, _, %Socket{}} = subscribe_and_join(socket, "realtime:test", %{})
     end
 
-    test "invalid" do
-      with_mocks([
-        {ChannelsAuthorization, [],
-         [
-           authorize_conn: fn _, _ ->
-             {:ok, %{"exp" => Joken.current_time(), "role" => "postgres"}}
-           end
-         ]}
-      ]) do
-        {:ok, %Socket{} = socket} =
-          connect(UserSocket, %{}, %{
-            uri: %{host: "#{@tenant}.localhost:4000/socket/websocket", query: ""},
-            x_headers: [{"x-api-key", "token123"}]
-          })
+    test "token has invalid expiration", %{tenant: tenant} do
+      assert capture_log(fn ->
+               jwt = Generators.generate_jwt_token(tenant, %{role: "authenticated", exp: System.system_time(:second)})
 
-        assert {:error, %{reason: "{:error, 0}"}} =
-                 subscribe_and_join(socket, "realtime:test", %{})
-      end
+               assert {:error, :expired_token} =
+                        connect(UserSocket, %{"log_level" => "warning"}, conn_opts(tenant, jwt))
 
-      with_mocks([
-        {ChannelsAuthorization, [],
-         [
-           authorize_conn: fn _, _ ->
-             {:ok, %{"exp" => Joken.current_time() - 1, "role" => "postgres"}}
-           end
-         ]}
-      ]) do
-        {:ok, %Socket{} = socket} =
-          connect(UserSocket, %{}, %{
-            uri: %{host: "#{@tenant}.localhost:4000/socket/websocket", query: ""},
-            x_headers: [{"x-api-key", "token123"}]
-          })
+               Process.sleep(300)
+             end) =~ "InvalidJWTToken: Token has expired"
 
-        assert {:error, %{reason: "{:error, -1}"}} =
-                 subscribe_and_join(socket, "realtime:test", %{})
-      end
+      jwt = Generators.generate_jwt_token(tenant, %{role: "authenticated", exp: System.system_time(:second) - 1})
+
+      assert capture_log(fn ->
+               assert {:error, :expired_token} =
+                        connect(UserSocket, %{"log_level" => "warning"}, conn_opts(tenant, jwt))
+             end) =~ "InvalidJWTToken: Token has expired"
     end
+
+    test "missing role claims returns a error", %{tenant: tenant} do
+      jwt = Generators.generate_jwt_token(tenant, %{exp: System.system_time(:second) + 1000})
+
+      log =
+        capture_log(fn ->
+          assert {:error, :missing_claims} = connect(UserSocket, %{"log_level" => "warning"}, conn_opts(tenant, jwt))
+        end)
+
+      assert log =~ "InvalidJWTToken: Fields `role` and `exp` are required in JWT"
+    end
+
+    test "missing exp claims returns a error", %{tenant: tenant} do
+      jwt = Generators.generate_jwt_token(tenant, %{role: "authenticated"})
+
+      log =
+        capture_log(fn ->
+          assert {:error, :missing_claims} = connect(UserSocket, %{"log_level" => "warning"}, conn_opts(tenant, jwt))
+        end)
+
+      assert log =~ "InvalidJWTToken: Fields `role` and `exp` are required in JWT"
+    end
+
+    test "missing claims returns a error with sub in metadata if available", %{tenant: tenant} do
+      sub = random_string()
+
+      jwt = Generators.generate_jwt_token(tenant, %{exp: System.system_time(:second) + 10_000, sub: sub})
+
+      log =
+        capture_log(fn ->
+          assert {:error, :missing_claims} = connect(UserSocket, %{"log_level" => "warning"}, conn_opts(tenant, jwt))
+
+          Process.sleep(300)
+        end)
+
+      assert log =~ "InvalidJWTToken: Fields `role` and `exp` are required in JWT"
+      assert log =~ "sub=#{sub}"
+    end
+
+    test "expired token returns a error with sub data if available", %{tenant: tenant} do
+      sub = random_string()
+
+      jwt =
+        Generators.generate_jwt_token(tenant, %{role: "authenticated", exp: System.system_time(:second) - 1, sub: sub})
+
+      log =
+        capture_log(fn ->
+          assert {:error, :expired_token} = connect(UserSocket, %{"log_level" => "warning"}, conn_opts(tenant, jwt))
+
+          Process.sleep(300)
+        end)
+
+      assert log =~ "InvalidJWTToken: Token has expired"
+      assert log =~ "sub=#{sub}"
+    end
+  end
+
+  describe "checks tenant db connectivity" do
+    test "successful connection proceeds with join", %{tenant: tenant} do
+      jwt = Generators.generate_jwt_token(tenant)
+
+      {:ok, %Socket{} = socket} = connect(UserSocket, %{"log_level" => "warning"}, conn_opts(tenant, jwt))
+      assert {:ok, _, %Socket{}} = subscribe_and_join(socket, "realtime:test", %{})
+    end
+
+    test "unsuccessful connection halts join", %{tenant: tenant} do
+      extension = %{
+        "type" => "postgres_cdc_rls",
+        "settings" => %{
+          "db_host" => "127.0.0.1",
+          "db_name" => "false",
+          "db_user" => "false",
+          "db_password" => "false",
+          "poll_interval" => 100,
+          "poll_max_changes" => 100,
+          "poll_max_record_bytes" => 1_048_576,
+          "region" => "us-east-1",
+          "ssl_enforced" => false
+        }
+      }
+
+      {:ok, tenant} = update_extension(tenant, extension)
+      jwt = Generators.generate_jwt_token(tenant)
+      {:ok, %Socket{} = socket} = connect(UserSocket, %{"log_level" => "warning"}, conn_opts(tenant, jwt))
+
+      assert {:error, %{reason: "Realtime was unable to connect to the project database"}} =
+               subscribe_and_join(socket, "realtime:test", %{})
+    end
+
+    test "lack of connections halts join", %{tenant: tenant} do
+      extension =
+        %{
+          "type" => "postgres_cdc_rls",
+          "settings" => %{
+            "db_host" => "127.0.0.1",
+            "db_name" => "postgres",
+            "db_user" => "tealbase_admin",
+            "db_password" => "postgres",
+            "poll_interval" => 100,
+            "poll_max_changes" => 100,
+            "poll_max_record_bytes" => 1_048_576,
+            "region" => "us-east-1",
+            "ssl_enforced" => false,
+            "db_pool" => 100,
+            "subcriber_pool_size" => 100,
+            "subs_pool_size" => 100
+          }
+        }
+
+      {:ok, tenant} = update_extension(tenant, extension)
+
+      jwt = Generators.generate_jwt_token(tenant)
+      {:ok, %Socket{} = socket} = connect(UserSocket, %{"log_level" => "warning"}, conn_opts(tenant, jwt))
+
+      assert {:error, %{reason: "Database can't accept more connections, Realtime won't connect"}} =
+               subscribe_and_join(socket, "realtime:test", %{})
+    end
+  end
+
+  defp conn_opts(tenant, token, params \\ %{}) do
+    [
+      connect_info: %{
+        uri: URI.parse("https://#{tenant.external_id}.localhost:4000/socket/websocket"),
+        x_headers: [{"x-api-key", token}]
+      },
+      params: params
+    ]
+  end
+
+  defp update_extension(tenant, extension) do
+    db_port = Realtime.Crypto.decrypt!(hd(tenant.extensions).settings["db_port"])
+
+    extensions = [
+      put_in(extension, ["settings", "db_port"], db_port)
+    ]
+
+    Realtime.Api.update_tenant(tenant, %{extensions: extensions})
   end
 end

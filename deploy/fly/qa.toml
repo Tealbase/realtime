@@ -9,6 +9,8 @@ processes = []
 
 [env]
   DNS_NODES = "realtime-qa.internal"
+  ERL_CRASH_DUMP = "/data/erl_crash.dump"
+  ERL_CRASH_DUMP_SECONDS = 30
 
 [experimental]
   allowed_public_ports = []

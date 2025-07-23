@@ -21,7 +21,8 @@ defmodule Realtime.PromEx.Plugins.Tenant do
     # Event metrics definitions
     [
       channel_events(),
-      replication_metrics()
+      replication_metrics(),
+      subscription_metrics()
     ]
   end
 
@@ -56,7 +57,7 @@ defmodule Realtime.PromEx.Plugins.Tenant do
     )
   end
 
-  def execute_tenant_metrics() do
+  def execute_tenant_metrics do
     tenants = Tenants.list_connected_tenants(Node.self())
 
     for t <- tenants do
@@ -64,15 +65,17 @@ defmodule Realtime.PromEx.Plugins.Tenant do
       cluster_count = UsersCounter.tenant_users(t)
       tenant = Tenants.Cache.get_tenant_by_external_id(t)
 
-      Telemetry.execute(
-        [:realtime, :connections],
-        %{connected: count, connected_cluster: cluster_count, limit: tenant.max_concurrent_users},
-        %{tenant: t}
-      )
+      if tenant != nil do
+        Telemetry.execute(
+          [:realtime, :connections],
+          %{connected: count, connected_cluster: cluster_count, limit: tenant.max_concurrent_users},
+          %{tenant: t}
+        )
+      end
     end
   end
 
-  defp replication_metrics() do
+  defp replication_metrics do
     Event.build(
       :realtime_tenant_replication_event_metrics,
       [
@@ -84,14 +87,36 @@ defmodule Realtime.PromEx.Plugins.Tenant do
           tags: [:tenant],
           unit: {:microsecond, :millisecond},
           reporter_options: [
-            buckets: [125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000]
+            buckets: [125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
           ]
         )
       ]
     )
   end
 
-  defp channel_events() do
+  defp subscription_metrics do
+    Event.build(
+      :realtime_tenant_channel_event_metrics,
+      [
+        sum(
+          [:realtime, :subscriptions_checker, :pid_not_found],
+          event_name: [:realtime, :subscriptions_checker, :pid_not_found],
+          measurement: :sum,
+          description: "Sum of pids not found in Subscription tables.",
+          tags: [:tenant]
+        ),
+        sum(
+          [:realtime, :subscriptions_checker, :phantom_pid_detected],
+          event_name: [:realtime, :subscriptions_checker, :phantom_pid_detected],
+          measurement: :sum,
+          description: "Sum of phantom pids detected in Subscription tables.",
+          tags: [:tenant]
+        )
+      ]
+    )
+  end
+
+  defp channel_events do
     Event.build(
       :realtime_tenant_channel_event_metrics,
       [
@@ -121,6 +146,27 @@ defmodule Realtime.PromEx.Plugins.Tenant do
           event_name: [:realtime, :rate_counter, :channel, :joins],
           measurement: :limit,
           description: "Rate limit of joins per second on a Realtime Channel.",
+          tags: [:tenant]
+        ),
+        sum(
+          [:realtime, :channel, :presence_events],
+          event_name: [:realtime, :rate_counter, :channel, :presence_events],
+          measurement: :sum,
+          description: "Sum of presence messages sent on a Realtime Channel.",
+          tags: [:tenant]
+        ),
+        last_value(
+          [:realtime, :tenants, :read_authorization_check],
+          event_name: [:realtime, :tenants, :read_authorization_check],
+          measurement: :count,
+          description: "Last value of read authorization checks.",
+          tags: [:tenant]
+        ),
+        last_value(
+          [:realtime, :tenants, :write_authorization_check],
+          event_name: [:realtime, :tenants, :write_authorization_check],
+          measurement: :count,
+          description: "Last value of write authorization checks.",
           tags: [:tenant]
         )
       ]

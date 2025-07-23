@@ -4,12 +4,24 @@ defmodule Realtime.Application do
   @moduledoc false
 
   use Application
-  require Logger, warn: false
+  require Logger
+
+  alias Realtime.Repo.Replica
 
   defmodule JwtSecretError, do: defexception([:message])
   defmodule JwtClaimValidatorsError, do: defexception([:message])
 
   def start(_type, _args) do
+    opentelemetry_setup()
+    primary_config = :logger.get_primary_config()
+
+    # add the region to logs
+    :ok =
+      :logger.set_primary_config(
+        :metadata,
+        Enum.into([region: System.get_env("REGION")], primary_config.metadata)
+      )
+
     topologies = Application.get_env(:libcluster, :topologies) || []
 
     if Application.fetch_env!(:realtime, :secure_channels) do
@@ -27,67 +39,110 @@ defmodule Realtime.Application do
       :gen_event.swap_sup_handler(
         :erl_signal_server,
         {:erl_signal_handler, []},
-        {Realtime.SignalHandler, []}
+        {Realtime.SignalHandler, %{handler_mod: :erl_signal_handler}}
       )
 
     Realtime.PromEx.set_metrics_tags()
+    :ets.new(Realtime.Tenants.Connect, [:named_table, :set, :public])
+    :syn.set_event_handler(Realtime.SynHandler)
 
-    Registry.start_link(
-      keys: :duplicate,
-      name: Realtime.Registry
-    )
+    :ok = :syn.add_node_to_scopes([:users, RegionNodes, Realtime.Tenants.Connect])
 
-    Registry.start_link(
-      keys: :unique,
-      name: Realtime.Registry.Unique
-    )
-
-    :syn.add_node_to_scopes([:users, RegionNodes])
-    :syn.join(RegionNodes, System.get_env("FLY_REGION"), self(), node: node())
-
-    extensions_supervisors =
-      Enum.reduce(Application.get_env(:realtime, :extensions), [], fn
-        {_, %{supervisor: name}}, acc ->
-          [
-            %{
-              id: name,
-              start: {name, :start_link, []},
-              restart: :transient
-            }
-            | acc
-          ]
-
-        _, acc ->
-          acc
-      end)
+    region = Application.get_env(:realtime, :region)
+    :syn.join(RegionNodes, region, self(), node: node())
+    migration_partition_slots = Application.get_env(:realtime, :migration_partition_slots)
+    connect_partition_slots = Application.get_env(:realtime, :connect_partition_slots)
 
     children =
       [
+        Realtime.ErlSysMon,
         Realtime.PromEx,
-        {Cluster.Supervisor, [topologies, [name: Realtime.ClusterSupervisor]]},
+        {Realtime.Telemetry.Logger, handler_id: "telemetry-logger"},
         Realtime.Repo,
         RealtimeWeb.Telemetry,
+        {Cluster.Supervisor, [topologies, [name: Realtime.ClusterSupervisor]]},
         {Phoenix.PubSub, name: Realtime.PubSub, pool_size: 10},
-        Realtime.GenCounter.DynamicSupervisor,
         {Cachex, name: Realtime.RateCounter},
-        Realtime.Tenants.Cache,
+        Realtime.Tenants.CacheSupervisor,
+        Realtime.GenCounter.DynamicSupervisor,
         Realtime.RateCounter.DynamicSupervisor,
-        RealtimeWeb.Endpoint,
-        RealtimeWeb.Presence,
-        {Task.Supervisor, name: Realtime.TaskSupervisor},
         Realtime.Latency,
-        Realtime.Telemetry.Logger
-      ] ++ extensions_supervisors
+        {Registry, keys: :duplicate, name: Realtime.Registry},
+        {Registry, keys: :unique, name: Realtime.Registry.Unique},
+        {Task.Supervisor, name: Realtime.TaskSupervisor},
+        {PartitionSupervisor,
+         child_spec: {DynamicSupervisor, max_restarts: 0},
+         strategy: :one_for_one,
+         name: Realtime.Tenants.Migrations.DynamicSupervisor,
+         partitions: migration_partition_slots},
+        {PartitionSupervisor,
+         child_spec: DynamicSupervisor,
+         strategy: :one_for_one,
+         name: Realtime.Tenants.Connect.DynamicSupervisor,
+         partitions: connect_partition_slots},
+        {PartitionSupervisor,
+         child_spec: DynamicSupervisor,
+         strategy: :one_for_one,
+         name: Realtime.Tenants.ReplicationConnection.DynamicSupervisor},
+        {PartitionSupervisor,
+         child_spec: DynamicSupervisor, strategy: :one_for_one, name: Realtime.Tenants.Listen.DynamicSupervisor},
+        RealtimeWeb.Endpoint,
+        RealtimeWeb.Presence
+      ] ++ extensions_supervisors() ++ janitor_tasks()
 
     children =
-      case Realtime.Repo.replica() do
+      case Replica.replica() do
         Realtime.Repo -> children
-        replica_repo -> List.insert_at(children, 2, replica_repo)
+        replica -> List.insert_at(children, 2, replica)
       end
 
     # See https://hexdocs.pm/elixir/Supervisor.html
     # for other strategies and supported options
     opts = [strategy: :one_for_one, name: Realtime.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  defp extensions_supervisors do
+    Enum.reduce(Application.get_env(:realtime, :extensions), [], fn
+      {_, %{supervisor: name}}, acc ->
+        opts = %{
+          id: name,
+          start: {name, :start_link, []},
+          restart: :transient
+        }
+
+        [opts | acc]
+
+      _, acc ->
+        acc
+    end)
+  end
+
+  defp janitor_tasks do
+    if Application.fetch_env!(:realtime, :run_janitor) do
+      janitor_max_children =
+        Application.get_env(:realtime, :janitor_max_children)
+
+      janitor_children_timeout =
+        Application.get_env(:realtime, :janitor_children_timeout)
+
+      [
+        {Task.Supervisor,
+         name: Realtime.Tenants.Janitor.TaskSupervisor,
+         max_children: janitor_max_children,
+         max_seconds: janitor_children_timeout,
+         max_restarts: 1},
+        Realtime.Tenants.Janitor,
+        Realtime.MetricsCleaner
+      ]
+    else
+      []
+    end
+  end
+
+  defp opentelemetry_setup do
+    :opentelemetry_cowboy.setup()
+    OpentelemetryPhoenix.setup(adapter: :cowboy2)
+    OpentelemetryEcto.setup([:realtime, :repo], db_statement: :enabled)
   end
 end
