@@ -2,10 +2,20 @@ name: Build Production
 on:
   push:
     branches:
-      - 'main'
+      - "main"
+    paths:
+      - "lib/**"
+      - "config/**"
+      - "priv/**"
+      - "assets/**"
+      - "rel/**"
+      - "mix.exs"
+      - "Dockerfile"
+      - "run.sh"
+
 jobs:
   release:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     outputs:
       published: ${{ steps.semantic.outputs.new_release_published }}
       version: ${{ steps.semantic.outputs.new_release_version }}
@@ -20,7 +30,7 @@ jobs:
 
   docker_x86_release:
     needs: release
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     if: needs.release.outputs.published == 'true'
     timeout-minutes: 120
     env:
@@ -32,9 +42,10 @@ jobs:
         uses: docker/metadata-action@v4
         with:
           images: |
-            supabase/realtime
+            tealbase/realtime
           tags: |
             type=raw,value=v${{ needs.release.outputs.version }}_${{ env.arch }}
+            type=raw,value=latest_${{ env.arch }}
 
       - uses: docker/setup-buildx-action@v2
 
@@ -68,9 +79,10 @@ jobs:
         uses: docker/metadata-action@v4
         with:
           images: |
-            supabase/realtime
+            tealbase/realtime
           tags: |
             type=raw,value=v${{ needs.release.outputs.version }}_${{ env.arch }}
+            type=raw,value=latest_${{ env.arch }}
 
       - uses: docker/login-action@v2
         with:
@@ -108,11 +120,17 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Merge multi-arch manifests
+      - name: Merge multi-arch manifests for versioned output
         run: |
-          docker buildx imagetools create -t supabase/realtime:v${{ needs.release.outputs.version }} \
-          supabase/realtime@${{ needs.docker_x86_release.outputs.image_digest }} \
-          supabase/realtime@${{ needs.docker_arm_release.outputs.image_digest }}
+          docker buildx imagetools create -t tealbase/realtime:v${{ needs.release.outputs.version }} \
+          tealbase/realtime@${{ needs.docker_x86_release.outputs.image_digest }} \
+          tealbase/realtime@${{ needs.docker_arm_release.outputs.image_digest }}
+
+      - name: Merge multi-arch manifests for latest output
+        run: |
+          docker buildx imagetools create -t tealbase/realtime:latest \
+          tealbase/realtime@${{ needs.docker_x86_release.outputs.image_digest }} \
+          tealbase/realtime@${{ needs.docker_arm_release.outputs.image_digest }}
 
       - name: configure aws credentials
         uses: aws-actions/configure-aws-credentials@v1
@@ -135,10 +153,10 @@ jobs:
       - name: Mirror to ECR
         uses: akhilerm/tag-push-action@v2.0.0
         with:
-          src: docker.io/supabase/realtime:v${{ needs.release.outputs.version }}
+          src: docker.io/tealbase/realtime:v${{ needs.release.outputs.version }}
           dst: |
-            public.ecr.aws/supabase/realtime:v${{ needs.release.outputs.version }}
-            ghcr.io/supabase/realtime:v${{ needs.release.outputs.version }}
+            public.ecr.aws/tealbase/realtime:v${{ needs.release.outputs.version }}
+            ghcr.io/tealbase/realtime:v${{ needs.release.outputs.version }}
 
   update-branch-name:
     needs: [release, docker_x86_release, docker_arm_release, merge_manifest]
@@ -148,6 +166,7 @@ jobs:
         uses: actions/checkout@v2
         with:
           ref: refs/heads/main
+
       - name: Update branch name
         run: |
           git branch -m main releases/v${{ needs.release.outputs.version }}

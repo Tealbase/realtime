@@ -1,0 +1,80 @@
+name: Tests
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "lib/**"
+      - "test/**"
+      - "config/**"
+      - "priv/**"
+      - "assets/**"
+      - "rel/**"
+      - "mix.exs"
+      - "Dockerfile"
+      - "run.sh"
+
+  push:
+    branches:
+      - main
+
+jobs:
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v2
+      - name: Setup elixir
+        id: beam
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: 27.x # Define the OTP version [required]
+          elixir-version: 1.17.x # Define the elixir version [required]
+      - name: Cache Mix
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: ${{ runner.os }}-mix-${{ hashFiles(format('{0}{1}', github.workspace, '/mix.lock')) }}
+          restore-keys: |
+            ${{ runner.os }}-mix-
+
+      - name: Install dependencies
+        run: mix deps.get
+      - name: Set up Postgres
+        run: docker compose -f docker-compose.dbs.yml up -d
+      - name: Run main database migrations
+        run: mix ecto.migrate --log-migrator-sql
+      - name: Run database tenant migrations
+        run: mix ecto.migrate --migrations-path lib/realtime/tenants/repo/migrations
+      - name: Run format check
+        run: mix format --check-formatted
+      - name: Credo checks
+        run: mix credo
+      - name: Run hex audit
+        run: mix hex.audit
+      - name: Run mix_audit
+        run: mix deps.audit --ignore-advisory-ids GHSA-vq52-99r9-h5pw,GHSA-9fm9-hp7p-53mf
+      - name: Run sobelow
+        run: mix sobelow --config .sobelow-conf
+      - name: Retrieve PLT Cache
+        uses: actions/cache@v4
+        id: plt-cache
+        with:
+          path: priv/plts
+          key: ${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-plts-${{ hashFiles(format('{0}{1}', github.workspace, '/mix.lock')) }}
+      - name: Create PLTs
+        if: steps.plt-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p priv/plts
+          mix dialyzer.build
+      - name: Run dialyzer
+        run: mix dialyzer
+      - name: Run dev seeds
+        run: DB_ENC_KEY="1234567890123456" mix ecto.setup
+      - name: Start epmd
+        run: epmd -daemon
+      - name: Run tests
+        run: MIX_ENV=test MAX_CASES=1 mix coveralls.github --trace
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,5 +1,5 @@
 defmodule SubscriptionsCheckerTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: true
   alias Extensions.PostgresCdcRls.SubscriptionsChecker, as: Checker
 
   test "subscribers_by_node/1" do
@@ -12,8 +12,6 @@ defmodule SubscriptionsCheckerTest do
     ]
 
     :ets.insert(tid, test_data)
-
-    result = Checker.subscribers_by_node(tid)
 
     assert Checker.subscribers_by_node(tid) == %{
              node1: MapSet.new([:pid1]),
@@ -57,10 +55,9 @@ defmodule SubscriptionsCheckerTest do
 
       :ets.insert(tid, test_data)
 
-      assert Checker.pop_not_alive_pids([:pid1], tid) == [
-               UUID.string_to_binary!(uuid1),
-               UUID.string_to_binary!(uuid2)
-             ]
+      not_alive = Enum.sort(Checker.pop_not_alive_pids([:pid1], tid, "id"))
+      expected = Enum.sort([UUID.string_to_binary!(uuid1), UUID.string_to_binary!(uuid2)])
+      assert not_alive == expected
 
       assert :ets.tab2list(tid) == [{:pid2, "uuid", :ref, :node2}]
     end
@@ -76,7 +73,7 @@ defmodule SubscriptionsCheckerTest do
       ]
 
       :ets.insert(tid, test_data)
-      assert Checker.pop_not_alive_pids([:pid1], tid) == [UUID.string_to_binary!(uuid1)]
+      assert Checker.pop_not_alive_pids([:pid1], tid, "id") == [UUID.string_to_binary!(uuid1)]
       assert :ets.tab2list(tid) == [{:pid2, "uuid", :ref, :node2}]
     end
   end

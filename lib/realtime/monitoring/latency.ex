@@ -4,10 +4,11 @@ defmodule Realtime.Latency do
   """
 
   use GenServer
-
   require Logger
+  import Realtime.Logs
 
-  alias Realtime.Helpers
+  alias Realtime.Nodes
+  alias Realtime.Rpc
 
   defmodule Payload do
     @moduledoc false
@@ -52,7 +53,7 @@ defmodule Realtime.Latency do
   end
 
   def handle_info(msg, state) do
-    Logger.warn("Unexpected message: #{inspect(msg)}")
+    Logger.warning("Unexpected message: #{inspect(msg)}")
     {:noreply, state}
   end
 
@@ -67,49 +68,33 @@ defmodule Realtime.Latency do
   Pings all the nodes in the cluster one after another and returns with their responses.
   There is a timeout for a single node rpc, and a timeout to yield_many which should really
   never get hit because these pings happen async under the Realtime.TaskSupervisor.
-
-  ## Examples
-
-  Emulate a healthy remote node:
-
-      iex> [{%Task{}, {:ok, %{response: {:ok, {:pong, "iad"}}}}}] = Realtime.Latency.ping()
-
-  Emulate a slow but healthy remote node:
-
-      iex> [{%Task{}, {:ok, %{response: {:ok, {:pong, "iad"}}}}}] = Realtime.Latency.ping(5_000, 10_000, 30_000)
-
-  Emulate an unhealthy remote node:
-
-      iex> [{%Task{}, {:ok, %{response: {:badrpc, :timeout}}}}] = Realtime.Latency.ping(5_000, 1_000)
-
-  No response from our Task for a remote node at all:
-
-      iex> [{%Task{}, nil}] = Realtime.Latency.ping(10_000, 5_000, 2_000)
-
   """
 
-  @spec ping :: [{%Task{}, tuple() | nil}]
+  @spec ping :: [{Task.t(), tuple() | nil}]
   def ping(pong_timeout \\ 0, timer_timeout \\ 5_000, yield_timeout \\ 5_000) do
     tasks =
       for n <- [Node.self() | Node.list()] do
         Task.Supervisor.async(Realtime.TaskSupervisor, fn ->
           {latency, response} =
-            :timer.tc(fn -> :rpc.call(n, __MODULE__, :pong, [pong_timeout], timer_timeout) end)
+            :timer.tc(fn ->
+              Rpc.call(n, __MODULE__, :pong, [pong_timeout], timeout: timer_timeout)
+            end)
 
           latency_ms = latency / 1_000
-          fly_region = Application.get_env(:realtime, :fly_region, "iad")
-          short_name = Helpers.short_node_id_from_name(n)
-          from_node = Helpers.short_node_id_from_name(Node.self())
+          region = Application.get_env(:realtime, :region, "not_set")
+          short_name = Nodes.short_node_id_from_name(n)
+          from_node = Nodes.short_node_id_from_name(Node.self())
 
           case response do
             {:badrpc, reason} ->
-              Logger.error(
-                "Network error: can't connect to node #{short_name} from #{fly_region} - #{inspect(reason)}"
+              log_error(
+                "RealtimeNodeDisconnected",
+                "Unable to connect to #{short_name} from #{region}: #{reason}"
               )
 
               payload = %Payload{
                 from_node: from_node,
-                from_region: fly_region,
+                from_region: region,
                 node: short_name,
                 region: nil,
                 latency: latency_ms,
@@ -124,13 +109,13 @@ defmodule Realtime.Latency do
             {:ok, {:pong, remote_region}} ->
               if latency_ms > 1_000,
                 do:
-                  Logger.warn(
-                    "Network warning: latency to #{remote_region} (#{short_name}) from #{fly_region} (#{from_node}) is #{latency_ms} ms"
+                  Logger.warning(
+                    "Network warning: latency to #{remote_region} (#{short_name}) from #{region} (#{from_node}) is #{latency_ms} ms"
                   )
 
               payload = %Payload{
                 from_node: from_node,
-                from_region: fly_region,
+                from_region: region,
                 node: short_name,
                 region: remote_region,
                 latency: latency_ms,
@@ -158,8 +143,8 @@ defmodule Realtime.Latency do
   """
 
   @spec pong :: {:ok, {:pong, String.t()}}
-  def pong() do
-    region = Application.get_env(:realtime, :fly_region, "iad")
+  def pong do
+    region = Application.get_env(:realtime, :region, "not_set")
     {:ok, {:pong, region}}
   end
 
@@ -169,7 +154,7 @@ defmodule Realtime.Latency do
     pong()
   end
 
-  defp ping_after() do
+  defp ping_after do
     Process.send_after(self(), :ping, @every)
   end
 end

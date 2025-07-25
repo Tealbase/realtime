@@ -1,5 +1,6 @@
 defmodule RealtimeWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :realtime
+  alias RealtimeWeb.Plugs.BaggageRequestId
 
   # The session will be stored in the cookie and signed,
   # this means its contents can be read but not tampered with.
@@ -14,9 +15,19 @@ defmodule RealtimeWeb.Endpoint do
     websocket: [
       connect_info: [:peer_data, :uri, :x_headers],
       fullsweep_after: 20,
-      max_frame_size: 8_000_000
+      max_frame_size: 8_000_000,
+      serializer: [
+        {Phoenix.Socket.V1.JSONSerializer, "~> 1.0.0"},
+        {Phoenix.Socket.V2.JSONSerializer, "~> 2.0.0"}
+      ]
     ],
-    longpoll: true
+    longpoll: [
+      connect_info: [:peer_data, :uri, :x_headers],
+      serializer: [
+        {Phoenix.Socket.V1.JSONSerializer, "~> 1.0.0"},
+        {Phoenix.Socket.V2.JSONSerializer, "~> 2.0.0"}
+      ]
+    ]
 
   socket "/live", Phoenix.LiveView.Socket, websocket: [connect_info: [session: @session_options]]
 
@@ -28,7 +39,7 @@ defmodule RealtimeWeb.Endpoint do
     at: "/",
     from: :realtime,
     gzip: false,
-    only: ~w(assets fonts images favicon.svg robots.txt)
+    only: RealtimeWeb.static_paths()
 
   # plug PromEx.Plug, path: "/metrics", prom_ex_module: Realtime.PromEx
 
@@ -44,7 +55,7 @@ defmodule RealtimeWeb.Endpoint do
     param_key: "request_logger",
     cookie_key: "request_logger"
 
-  plug Plug.RequestId
+  plug BaggageRequestId, baggage_key: BaggageRequestId.baggage_key()
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 
   plug Plug.Parsers,

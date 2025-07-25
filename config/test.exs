@@ -10,33 +10,47 @@ for repo <- [
       Realtime.Repo.Replica.FRA,
       Realtime.Repo.Replica.IAD,
       Realtime.Repo.Replica.SIN,
-      Realtime.Repo.Replica.SJC
+      Realtime.Repo.Replica.SJC,
+      Realtime.Repo.Replica.Singapore,
+      Realtime.Repo.Replica.London,
+      Realtime.Repo.Replica.NorthVirginia,
+      Realtime.Repo.Replica.Oregon,
+      Realtime.Repo.Replica.SanJose
     ] do
   config :realtime, repo,
     username: "postgres",
     password: "postgres",
     database: "realtime_test",
-    hostname: "localhost",
+    hostname: "127.0.0.1",
     pool: Ecto.Adapters.SQL.Sandbox
 end
 
-# We don't run a server during test. If one is required,
-# you can enable the server option below.
+# Running server during tests to run integration tests
 config :realtime, RealtimeWeb.Endpoint,
   http: [port: 4002],
-  server: false
+  server: true
 
 config :realtime,
+  region: "us-east-1",
   secure_channels: true,
   db_enc_key: "1234567890123456",
   jwt_claim_validators: System.get_env("JWT_CLAIM_VALIDATORS", "{}"),
-  api_jwt_secret: System.get_env("API_JWT_SECRET"),
+  api_jwt_secret: System.get_env("API_JWT_SECRET", "secret"),
   metrics_jwt_secret: "test",
   prom_poll_rate: 5_000,
-  fly_alloc_id: "123e4567-e89b-12d3-a456-426614174000"
+  request_id_baggage_key: "sb-request-id"
 
-config :joken,
-  current_time_adapter: RealtimeWeb.Joken.CurrentTime.Mock
+# Print only errors during test
+config :logger,
+  compile_time_purge_matching: [[module: Postgrex], [module: DBConnection]],
+  level: :warning
 
-# Print only warnings and errors during test
-config :logger, level: :warn
+# Configures Elixir's Logger
+config :logger, :console,
+  format: "$time $metadata[$level] $message\n",
+  metadata: [:request_id, :project, :external_id, :application_name, :sub]
+
+config :opentelemetry,
+  span_processor: :simple,
+  traces_exporter: :none,
+  processors: [{:otel_simple_processor, %{}}]

@@ -1,70 +1,79 @@
 defmodule RealtimeWeb.TenantController do
   use RealtimeWeb, :controller
-  use PhoenixSwagger
+  use OpenApiSpex.ControllerSpecs
 
   require Logger
+  import Realtime.Logs
 
   alias Realtime.Api
-  alias Realtime.Repo
   alias Realtime.Api.Tenant
+  alias Realtime.Database
   alias Realtime.PostgresCdc
-  alias PhoenixSwagger.{Path, Schema}
-  alias RealtimeWeb.{UserSocket, Endpoint}
+  alias Realtime.Tenants
+  alias Realtime.Tenants.Cache
+  alias Realtime.Tenants.Migrations
+  alias RealtimeWeb.OpenApiSchemas.EmptyResponse
+  alias RealtimeWeb.OpenApiSchemas.ErrorResponse
+  alias RealtimeWeb.OpenApiSchemas.NotFoundResponse
+  alias RealtimeWeb.OpenApiSchemas.TenantHealthResponse
+  alias RealtimeWeb.OpenApiSchemas.TenantParams
+  alias RealtimeWeb.OpenApiSchemas.TenantResponse
+  alias RealtimeWeb.OpenApiSchemas.TenantResponseList
+  alias RealtimeWeb.OpenApiSchemas.UnauthorizedResponse
 
   @stop_timeout 10_000
 
   action_fallback(RealtimeWeb.FallbackController)
 
-  swagger_path :index do
-    Path.get("/api/tenants")
-    tag("Tenants")
-    response(200, "Success", :TenantsResponse)
-  end
+  plug :set_observability_attributes when action in [:show, :edit, :update, :delete, :reload, :health]
+
+  operation(:index,
+    summary: "List tenants",
+    parameters: [
+      authorization: [
+        in: :header,
+        name: "Authorization",
+        schema: %OpenApiSpex.Schema{type: :string},
+        required: true,
+        example:
+          "Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE2ODAxNjIxNTR9.U9orU6YYqXAtpF8uAiw6MS553tm4XxRzxOhz2IwDhpY"
+      ]
+    ],
+    responses: %{
+      200 => TenantResponseList.response(),
+      403 => EmptyResponse.response()
+    }
+  )
 
   def index(conn, _params) do
     tenants = Api.list_tenants()
     render(conn, "index.json", tenants: tenants)
   end
 
-  def create(conn, %{"tenant" => tenant_params}) do
-    extensions =
-      Enum.reduce(tenant_params["extensions"], [], fn
-        %{"type" => type, "settings" => settings}, acc ->
-          [%{"type" => type, "settings" => settings} | acc]
+  operation(:show,
+    summary: "Fetch tenant",
+    parameters: [
+      token: [
+        in: :header,
+        name: "Authorization",
+        schema: %OpenApiSpex.Schema{type: :string},
+        required: true,
+        example:
+          "Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE2ODAxNjIxNTR9.U9orU6YYqXAtpF8uAiw6MS553tm4XxRzxOhz2IwDhpY"
+      ],
+      tenant_id: [in: :path, description: "Tenant ID", type: :string]
+    ],
+    responses: %{
+      200 => TenantResponse.response(),
+      403 => EmptyResponse.response(),
+      404 => NotFoundResponse.response()
+    }
+  )
 
-        _e, acc ->
-          acc
-      end)
+  def show(conn, %{"tenant_id" => id}) do
+    tenant = Api.get_tenant_by_external_id(id)
 
-    with {:ok, %Tenant{} = tenant} <-
-           Api.create_tenant(%{tenant_params | "extensions" => extensions}) do
-      Logger.metadata(external_id: tenant.external_id, project: tenant.external_id)
-
-      conn
-      |> put_status(:created)
-      |> put_resp_header("location", Routes.tenant_path(conn, :show, tenant))
-      |> render("show.json", tenant: tenant)
-    end
-  end
-
-  swagger_path :show do
-    Path.get("/api/tenants/{external_id}")
-    tag("Tenants")
-
-    parameter(:external_id, :path, :string, "",
-      required: true,
-      example: "72ac258c-8dcd-4f0d-992f-9b6bab5e6d19"
-    )
-
-    response(200, "Success", :TenantResponse)
-  end
-
-  def show(conn, %{"id" => id}) do
-    Logger.metadata(external_id: id, project: id)
-
-    id
-    |> Api.get_tenant_by_external_id()
-    |> case do
+    case tenant do
       %Tenant{} = tenant ->
         render(conn, "show.json", tenant: tenant)
 
@@ -75,100 +84,194 @@ defmodule RealtimeWeb.TenantController do
     end
   end
 
-  swagger_path :update do
-    Path.put("/api/tenants/{external_id}")
-    tag("Tenants")
-
-    parameters do
-      external_id(:path, :string, "",
+  operation(:create,
+    summary: "Create or update tenant",
+    parameters: [
+      token: [
+        in: :header,
+        name: "Authorization",
+        schema: %OpenApiSpex.Schema{type: :string},
         required: true,
-        maxLength: 255,
-        example: "72ac258c-8dcd-4f0d-992f-9b6bab5e6d19"
-      )
+        example:
+          "Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE2ODAxNjIxNTR9.U9orU6YYqXAtpF8uAiw6MS553tm4XxRzxOhz2IwDhpY"
+      ]
+    ],
+    request_body: TenantParams.params(),
+    responses: %{
+      200 => TenantResponse.response(),
+      403 => EmptyResponse.response()
+    }
+  )
 
-      tenant(:body, Schema.ref(:TenantReq), "", required: true)
+  @spec create(any(), map()) :: any()
+  def create(conn, %{"tenant" => params}) do
+    external_id = Map.get(params, "external_id")
+
+    case Tenant.changeset(%Tenant{}, params) do
+      %{valid?: true} -> update(conn, %{"tenant_id" => external_id, "tenant" => params})
+      changeset -> changeset
     end
-
-    response(200, "Success", :TenantResponse)
   end
 
-  def update(conn, %{"id" => id, "tenant" => tenant_params}) do
-    Logger.metadata(external_id: id, project: id)
+  operation(:update,
+    summary: "Create or update tenant",
+    parameters: [
+      token: [
+        in: :header,
+        name: "Authorization",
+        schema: %OpenApiSpex.Schema{type: :string},
+        required: true,
+        example:
+          "Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE2ODAxNjIxNTR9.U9orU6YYqXAtpF8uAiw6MS553tm4XxRzxOhz2IwDhpY"
+      ],
+      tenant_id: [in: :path, description: "Tenant ID", type: :string]
+    ],
+    request_body: TenantParams.params(),
+    responses: %{
+      200 => TenantResponse.response(),
+      403 => EmptyResponse.response()
+    }
+  )
 
-    case Api.get_tenant_by_external_id(id) do
+  def update(conn, %{"tenant_id" => external_id, "tenant" => tenant_params}) do
+    tenant = Api.get_tenant_by_external_id(external_id)
+
+    case tenant do
       nil ->
-        create(conn, %{"tenant" => Map.put(tenant_params, "external_id", id)})
+        tenant_params = tenant_params |> Map.put("external_id", external_id) |> Map.put("name", external_id)
+
+        extensions =
+          Enum.reduce(tenant_params["extensions"], [], fn
+            %{"type" => type, "settings" => settings}, acc -> [%{"type" => type, "settings" => settings} | acc]
+            _e, acc -> acc
+          end)
+
+        with {:ok, %Tenant{} = tenant} <- Api.create_tenant(%{tenant_params | "extensions" => extensions}),
+             res when res in [:ok, :noop] <- Migrations.run_migrations(tenant) do
+          Logger.metadata(external_id: tenant.external_id, project: tenant.external_id)
+
+          conn
+          |> put_status(:created)
+          |> put_resp_header("location", Routes.tenant_path(conn, :show, tenant))
+          |> render("show.json", tenant: tenant)
+        end
 
       tenant ->
         with {:ok, %Tenant{} = tenant} <- Api.update_tenant(tenant, tenant_params) do
-          render(conn, "show.json", tenant: tenant)
+          conn
+          |> put_status(:ok)
+          |> put_resp_header("location", Routes.tenant_path(conn, :show, tenant))
+          |> render("show.json", tenant: tenant)
         end
     end
   end
 
-  swagger_path :delete do
-    Path.delete("/api/tenants/{external_id}")
-    tag("Tenants")
-    description("Delete a tenant by ID")
+  operation(:delete,
+    summary: "Delete tenant",
+    parameters: [
+      token: [
+        in: :header,
+        name: "Authorization",
+        schema: %OpenApiSpex.Schema{type: :string},
+        required: true,
+        example:
+          "Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE2ODAxNjIxNTR9.U9orU6YYqXAtpF8uAiw6MS553tm4XxRzxOhz2IwDhpY"
+      ],
+      tenant_id: [in: :path, description: "Tenant ID", type: :string]
+    ],
+    responses: %{
+      204 => EmptyResponse.response(),
+      403 => UnauthorizedResponse.response(),
+      500 => ErrorResponse.response()
+    }
+  )
 
-    parameter(:id, :path, :string, "Tenant ID",
-      required: true,
-      example: "123e4567-e89b-12d3-a456-426655440000"
-    )
+  def delete(conn, %{"tenant_id" => tenant_id}) do
+    stop_all_timeout = Enum.count(PostgresCdc.available_drivers()) * 1_000
 
-    response(200, "No Content - Deleted Successfully")
-  end
-
-  def delete(conn, %{"id" => id}) do
-    Logger.metadata(external_id: id, project: id)
-
-    Repo.transaction(
-      fn ->
-        if Api.delete_tenant_by_external_id(id) do
-          with :ok <- UserSocket.subscribers_id(id) |> Endpoint.broadcast("disconnect", %{}),
-               :ok <- PostgresCdc.stop_all(id) do
-            :ok
-          else
-            other -> Repo.rollback(other)
-          end
-        end
-      end,
-      timeout: @stop_timeout
-    )
-    |> case do
-      {:error, reason} ->
-        Logger.error("Can't remove tenant #{inspect(reason)}")
-        send_resp(conn, 503, "")
-
-      _ ->
+    with %Tenant{} = tenant <- Api.get_tenant_by_external_id(tenant_id, :primary),
+         _ <- Tenants.suspend_tenant_by_external_id(tenant_id),
+         true <- Api.delete_tenant_by_external_id(tenant_id),
+         :ok <- Cache.distributed_invalidate_tenant_cache(tenant_id),
+         :ok <- PostgresCdc.stop_all(tenant, stop_all_timeout),
+         :ok <- Database.replication_slot_teardown(tenant) do
+      send_resp(conn, 204, "")
+    else
+      nil ->
+        log_error("TenantNotFound", "Tenant not found")
         send_resp(conn, 204, "")
+
+      err ->
+        log_error("UnableToDeleteTenant", err)
+        conn |> put_status(500) |> json(err) |> halt()
     end
   end
 
-  swagger_path :reload do
-    Path.post("/api/tenants/{external_id}/reload")
-    tag("Tenants")
-    description("Reload tenant database supervisor")
-
-    parameter(:tenant_id, :path, :string, "Tenant ID",
-      required: true,
-      example: "123e4567-e89b-12d3-a456-426655440000"
-    )
-
-    response(204, "")
-    response(404, "not found")
-  end
+  operation(:reload,
+    summary: "Reload tenant",
+    parameters: [
+      token: [
+        in: :header,
+        name: "Authorization",
+        schema: %OpenApiSpex.Schema{type: :string},
+        required: true,
+        example:
+          "Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE2ODAxNjIxNTR9.U9orU6YYqXAtpF8uAiw6MS553tm4XxRzxOhz2IwDhpY"
+      ],
+      tenant_id: [in: :path, description: "Tenant ID", type: :string]
+    ],
+    responses: %{
+      204 => EmptyResponse.response(),
+      403 => EmptyResponse.response(),
+      404 => NotFoundResponse.response()
+    }
+  )
 
   def reload(conn, %{"tenant_id" => tenant_id}) do
-    Logger.metadata(external_id: tenant_id, project: tenant_id)
-
-    case Api.get_tenant_by_external_id(tenant_id) do
-      %Tenant{} ->
-        PostgresCdc.stop_all(tenant_id, @stop_timeout)
-        send_resp(conn, 204, "")
-
+    case Tenants.get_tenant_by_external_id(tenant_id) do
       nil ->
-        Logger.error("Atttempted to reload non-existant tenant #{tenant_id}")
+        log_error("TenantNotFound", "Tenant not found")
+
+        conn
+        |> put_status(404)
+        |> render("not_found.json", tenant: nil)
+
+      tenant ->
+        PostgresCdc.stop_all(tenant, @stop_timeout)
+        send_resp(conn, 204, "")
+    end
+  end
+
+  operation(:health,
+    summary: "Tenant health",
+    parameters: [
+      token: [
+        in: :header,
+        name: "Authorization",
+        schema: %OpenApiSpex.Schema{type: :string},
+        required: true,
+        example:
+          "Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE2ODAxNjIxNTR9.U9orU6YYqXAtpF8uAiw6MS553tm4XxRzxOhz2IwDhpY"
+      ],
+      tenant_id: [in: :path, description: "Tenant ID", type: :string]
+    ],
+    responses: %{
+      200 => TenantHealthResponse.response(),
+      403 => EmptyResponse.response(),
+      404 => NotFoundResponse.response()
+    }
+  )
+
+  def health(conn, %{"tenant_id" => tenant_id}) do
+    case Tenants.health_check(tenant_id) do
+      {:ok, response} ->
+        json(conn, %{data: response})
+
+      {:error, %{healthy: false} = response} ->
+        json(conn, %{data: response})
+
+      {:error, :tenant_not_found} ->
+        log_error("TenantNotFound", "Tenant not found")
 
         conn
         |> put_status(404)
@@ -176,118 +279,11 @@ defmodule RealtimeWeb.TenantController do
     end
   end
 
-  def swagger_definitions do
-    %{
-      Tenant:
-        swagger_schema do
-          title("Tenant")
+  defp set_observability_attributes(conn, _opts) do
+    tenant_id = conn.path_params["tenant_id"]
+    OpenTelemetry.Tracer.set_attributes(external_id: tenant_id)
+    Logger.metadata(external_id: tenant_id, project: tenant_id)
 
-          properties do
-            id(:string, "", required: false, example: "72ac258c-8dcd-4f0d-992f-9b6bab5e6d19")
-            name(:string, "", required: false, example: "tenant1")
-            external_id(:string, "", required: false, example: "okumviwlylkmpkoicbrc")
-            inserted_at(:string, "", required: false, example: "2022-02-16T20:41:47")
-            max_concurrent_users(:integer, "", required: false, example: 10_000)
-            extensions(:array, "", required: true, items: Schema.ref(:ExtensionPostgres))
-          end
-        end,
-      ExtensionPostgres:
-        swagger_schema do
-          title("ExtensionPostgres")
-
-          properties do
-            type(:string, "", required: true, example: "postgres")
-            inserted_at(:string, "", required: false, example: "2022-02-16T20:41:47")
-            updated_at(:string, "", required: false, example: "2022-02-16T20:41:47")
-
-            settings(:object, "",
-              required: true,
-              properties: %{
-                db_host: %Schema{type: :string, example: "some encrypted value"},
-                db_name: %Schema{type: :string, example: "some encrypted value"},
-                db_password: %Schema{type: :string, example: "some encrypted value"},
-                db_port: %Schema{type: :string, example: "some encrypted value"},
-                db_user: %Schema{type: :string, example: "some encrypted value"},
-                poll_interval_ms: %Schema{type: :integer, example: 100},
-                poll_max_changes: %Schema{type: :integer, example: 100},
-                poll_max_record_bytes: %Schema{type: :integer, example: 1_048_576},
-                publication: %Schema{type: :string, example: "tealbase_realtime"},
-                region: %Schema{type: :string, example: "us-east-1"},
-                slot_name: %Schema{
-                  type: :string,
-                  example: "tealbase_realtime_replication_slot"
-                }
-              }
-            )
-          end
-        end,
-      TenantReq:
-        swagger_schema do
-          title("TenantReq")
-
-          properties do
-            name(:string, "", required: false, example: "tenant1", maxLength: 255)
-            max_concurrent_users(:integer, "", required: false, example: 10_000, default: 10_000)
-            extensions(:array, "", required: true, items: Schema.ref(:ExtensionPostgresReq))
-          end
-        end,
-      ExtensionPostgresReq:
-        swagger_schema do
-          title("ExtensionPostgresReq")
-
-          properties do
-            type(:string, "", required: true, example: "postgres")
-
-            settings(:object, "",
-              required: true,
-              properties: %{
-                db_host: %Schema{type: :string, required: true, example: "127.0.0.1"},
-                db_name: %Schema{type: :string, required: true, example: "postgres"},
-                db_password: %Schema{
-                  type: :string,
-                  required: true,
-                  example: "postgres"
-                },
-                db_user: %Schema{type: :string, required: true, example: "postgres"},
-                db_port: %Schema{type: :string, required: true, example: "6432"},
-                region: %Schema{type: :string, required: true, example: "us-east-1"},
-                poll_interval_ms: %Schema{type: :integer, default: 100, example: 100},
-                poll_max_changes: %Schema{type: :integer, default: 100, example: 100},
-                poll_max_record_bytes: %Schema{
-                  type: :integer,
-                  default: 1_048_576,
-                  example: 1_048_576
-                },
-                publication: %Schema{
-                  type: :string,
-                  default: "tealbase_realtime",
-                  example: "tealbase_realtime"
-                },
-                slot_name: %Schema{
-                  type: :string,
-                  default: "tealbase_realtime_replication_slot",
-                  example: "tealbase_realtime_replication_slot"
-                }
-              }
-            )
-          end
-        end,
-      Tenants:
-        swagger_schema do
-          title("Tenants")
-          type(:array)
-          items(Schema.ref(:Tenant))
-        end,
-      TenantsResponse:
-        swagger_schema do
-          title("TenantsResponse")
-          property(:data, Schema.ref(:Tenants), "")
-        end,
-      TenantResponse:
-        swagger_schema do
-          title("TenantResponse")
-          property(:data, Schema.ref(:Tenant), "")
-        end
-    }
+    conn
   end
 end

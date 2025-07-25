@@ -4,33 +4,33 @@ defmodule Extensions.PostgresCdcRls.Subscriptions do
   """
   require Logger
   import Postgrex, only: [transaction: 2, query: 3, rollback: 2]
+  import Realtime.Logs
 
   @type conn() :: Postgrex.conn()
 
   @filter_types ["eq", "neq", "lt", "lte", "gt", "gte", "in"]
 
-  @spec create(conn(), String.t(), list(map())) ::
+  @spec create(conn(), String.t(), [map()], pid(), pid()) ::
           {:ok, Postgrex.Result.t()}
-          | {:error,
-             Exception.t() | :malformed_subscription_params | {:subscription_insert_failed, map()}}
-  def create(conn, publication, params_list) do
+          | {:error, Exception.t() | :malformed_subscription_params | {:subscription_insert_failed, map()}}
+  def create(conn, publication, params_list, manager, caller) do
     sql = "with sub_tables as (
-		    select
-			    rr.entity
-		    from
-			    pg_publication_tables pub,
-			    lateral (
-				    select
-					    format('%I.%I', pub.schemaname, pub.tablename)::regclass entity
-			    ) rr
-		    where
-			    pub.pubname = $1
-			  and pub.schemaname like (case $2 when '*' then '%' else $2 end)
-			  and pub.tablename like (case $3 when '*' then '%' else $3 end)
-	    )
-	    insert into realtime.subscription as x(
-		    subscription_id,
-		    entity,
+        select
+        rr.entity
+        from
+        pg_publication_tables pub,
+        lateral (
+        select
+        format('%I.%I', pub.schemaname, pub.tablename)::regclass entity
+        ) rr
+        where
+        pub.pubname = $1
+        and pub.schemaname like (case $2 when '*' then '%' else $2 end)
+        and pub.tablename like (case $3 when '*' then '%' else $3 end)
+     )
+     insert into realtime.subscription as x(
+        subscription_id,
+        entity,
         filters,
         claims
       )
@@ -50,25 +50,28 @@ defmodule Extensions.PostgresCdcRls.Subscriptions do
          id"
 
     transaction(conn, fn conn ->
-      params_list
-      |> Enum.map(fn %{id: id, claims: claims, params: params} ->
+      Enum.map(params_list, fn %{id: id, claims: claims, params: params} ->
         case parse_subscription_params(params) do
           {:ok, [schema, table, filters]} ->
             case query(conn, sql, [publication, schema, table, id, claims, filters]) do
               {:ok, %{num_rows: num} = result} when num > 0 ->
+                send(manager, {:subscribed, {caller, id}})
                 result
 
               {:ok, _} ->
-                rollback(
-                  conn,
-                  "Subscription insert failed with 0 rows. Check that tables are part of publication #{publication} and subscription params are correct: #{inspect(params)}"
-                )
+                msg =
+                  "Unable to subscribe to changes with given parameters. Please check Realtime is enabled for the given connect parameters: [#{params_to_log(params)}]"
+
+                log_warning("RealtimeDisabledForConfiguration", msg)
+                rollback(conn, msg)
 
               {:error, exception} ->
-                rollback(
-                  conn,
-                  "Subscription insert failed with error: #{Exception.message(exception)}. Check that tables are part of publication #{publication} and subscription params are correct: #{inspect(params)}"
-                )
+                msg =
+                  "Unable to subscribe to changes with given parameters. An exception happened so please check your connect parameters: [#{params_to_log(params)}]. Exception: #{Exception.message(exception)}"
+
+                log_error("RealtimeSubscriptionError", msg)
+
+                rollback(conn, msg)
             end
 
           {:error, reason} ->
@@ -76,6 +79,12 @@ defmodule Extensions.PostgresCdcRls.Subscriptions do
         end
       end)
     end)
+  end
+
+  defp params_to_log(map) do
+    map
+    |> Map.to_list()
+    |> Enum.map_join(", ", fn {k, v} -> "#{k}: #{to_log(v)}" end)
   end
 
   @spec delete(conn(), String.t()) :: any()
@@ -136,7 +145,10 @@ defmodule Extensions.PostgresCdcRls.Subscriptions do
       {:ok, %{columns: ["schemaname", "tablename", "oid"], rows: rows}} ->
         Enum.reduce(rows, %{}, fn [schema, table, oid], acc ->
           if String.contains?(table, " ") do
-            Logger.error("Publication table name contains spaces: \"#{schema}\".\"#{table}\"")
+            log_error(
+              "TableHasSpacesInName",
+              "Table name cannot have spaces: \"#{schema}\".\"#{table}\""
+            )
           end
 
           Map.put(acc, {schema, table}, [oid])
@@ -207,9 +219,13 @@ defmodule Extensions.PostgresCdcRls.Subscriptions do
       %{"table" => table} ->
         {:ok, ["public", table, []]}
 
-      _ ->
+      map when is_map_key(map, "user_token") or is_map_key(map, "auth_token") ->
         {:error,
-         "No subscription params provided. Please provide at least a `schema` or `table` to subscribe to."}
+         "No subscription params provided. Please provide at least a `schema` or `table` to subscribe to: <redacted>"}
+
+      error ->
+        {:error,
+         "No subscription params provided. Please provide at least a `schema` or `table` to subscribe to: #{inspect(error)}"}
     end
   end
 

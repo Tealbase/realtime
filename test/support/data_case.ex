@@ -23,17 +23,16 @@ defmodule Realtime.DataCase do
       import Ecto.Changeset
       import Ecto.Query
       import Realtime.DataCase
+      import Generators
+      import TenantConnection
     end
   end
 
   setup tags do
-    :ok = Sandbox.checkout(Realtime.Repo)
+    pid = Sandbox.start_owner!(Realtime.Repo, shared: not tags[:async])
+    on_exit(fn -> Sandbox.stop_owner(pid) end)
 
-    unless tags[:async] do
-      Sandbox.mode(Realtime.Repo, {:shared, self()})
-    end
-
-    :ok
+    {:ok, conn: Phoenix.ConnTest.build_conn()}
   end
 
   @doc """

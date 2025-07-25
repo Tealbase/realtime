@@ -31,7 +31,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: akhilerm/tag-push-action@v2.1.0
         with:
-          src: docker.io/supabase/realtime:${{ inputs.version }}
+          src: docker.io/tealbase/realtime:${{ inputs.version }}
           dst: |
-            public.ecr.aws/supabase/realtime:${{ inputs.version }}
-            ghcr.io/supabase/realtime:${{ inputs.version }}
+            public.ecr.aws/tealbase/realtime:${{ inputs.version }}
+            ghcr.io/tealbase/realtime:${{ inputs.version }}

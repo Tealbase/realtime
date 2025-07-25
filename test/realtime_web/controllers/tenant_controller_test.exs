@@ -1,169 +1,446 @@
 defmodule RealtimeWeb.TenantControllerTest do
-  use RealtimeWeb.ConnCase
+  # Can't run async true because under the hood Cachex is used and it doesn't see Ecto.Sandbox
+  # Also using global otel_simple_processor
+  use RealtimeWeb.ConnCase, async: false
 
-  import Mock
-  import Realtime.Helpers, only: [encrypt!: 2]
+  require OpenTelemetry.Tracer, as: Tracer
 
-  alias Realtime.Api
   alias Realtime.Api.Tenant
-  alias RealtimeWeb.{ChannelsAuthorization, JwtVerification}
-
-  @external_id "test_external_id"
-
-  @create_attrs %{
-    "name" => "localhost",
-    "extensions" => [
-      %{
-        "type" => "postgres_cdc_rls",
-        "settings" => %{
-          "db_host" => "127.0.0.1",
-          "db_name" => "postgres",
-          "db_user" => "postgres",
-          "db_password" => "postgres",
-          "db_port" => "6432",
-          "poll_interval" => 100,
-          "poll_max_changes" => 100,
-          "poll_max_record_bytes" => 1_048_576,
-          "region" => "us-east-1"
-        }
-      }
-    ],
-    "postgres_cdc_default" => "postgres_cdc_rls",
-    "jwt_secret" => "new secret"
-  }
-
-  @update_attrs %{
-    jwt_secret: "some updated jwt_secret",
-    name: "some updated name",
-    max_concurrent_users: 200
-  }
+  alias Realtime.Crypto
+  alias Realtime.Database
+  alias Realtime.PromEx.Plugins.Tenants
+  alias Realtime.Tenants
+  alias Realtime.Tenants.Cache
+  alias Realtime.Tenants.Connect
+  alias Realtime.UsersCounter
 
   @invalid_attrs %{external_id: nil, jwt_secret: nil, extensions: [], name: nil}
 
-  def fixture(:tenant) do
-    {:ok, tenant} =
-      Map.put(@create_attrs, "external_id", @external_id)
-      |> Api.create_tenant()
+  setup context do
+    %{conn: conn} = context
+    key = Application.get_env(:realtime, :api_jwt_secret)
+    jwt = generate_jwt_token(key)
 
-    tenant
-  end
-
-  setup %{conn: conn} do
-    Application.put_env(:realtime, :db_enc_key, "1234567890123456")
-
-    new_conn =
+    conn =
       conn
       |> put_req_header("accept", "application/json")
-      |> put_req_header(
-        "authorization",
-        "Bearer auth_token"
-      )
+      |> put_req_header("authorization", "Bearer #{jwt}")
 
-    {:ok, conn: new_conn}
+    :otel_simple_processor.set_exporter(:otel_exporter_pid, self())
+
+    {:ok, conn: conn}
   end
 
-  describe "create tenant" do
-    test "renders tenant when data is valid", %{conn: conn} do
-      with_mock JwtVerification, verify: fn _token, _secret -> {:ok, %{}} end do
-        ext_id = @external_id
-        conn = put(conn, Routes.tenant_path(conn, :update, ext_id), tenant: @create_attrs)
-        assert %{"id" => _id, "external_id" => ^ext_id} = json_response(conn, 201)["data"]
-        conn = get(conn, Routes.tenant_path(conn, :show, ext_id))
-        assert ^ext_id = json_response(conn, 200)["data"]["external_id"]
-        assert 200 = json_response(conn, 200)["data"]["max_concurrent_users"]
-      end
+  defp with_tenant(_context) do
+    tenant = Containers.checkout_tenant(run_migrations: true)
+    %{tenant: tenant}
+  end
+
+  describe "show tenant" do
+    setup [:with_tenant]
+
+    test "removes db_password", %{conn: conn, tenant: tenant} do
+      conn = get(conn, ~p"/api/tenants/#{tenant.external_id}")
+      response = json_response(conn, 200)
+      refute get_in(response, ["data", "extensions", Access.at(0), "settings", "db_password"])
     end
 
-    test "encrypt creds", %{conn: conn} do
-      with_mock JwtVerification, verify: fn _token, _secret -> {:ok, %{}} end do
-        ext_id = @external_id
-        conn = put(conn, Routes.tenant_path(conn, :update, ext_id), tenant: @create_attrs)
-        [%{"settings" => settings}] = json_response(conn, 201)["data"]["extensions"]
-        sec_key = Application.get_env(:realtime, :db_enc_key)
-        assert encrypt!("127.0.0.1", sec_key) == settings["db_host"]
-        assert encrypt!("postgres", sec_key) == settings["db_name"]
-        assert encrypt!("postgres", sec_key) == settings["db_user"]
-        assert encrypt!("postgres", sec_key) == settings["db_password"]
+    test "returns not found on non existing tenant", %{conn: conn} do
+      conn = get(conn, ~p"/api/tenants/no")
+      response = json_response(conn, 404)
+      assert response == %{"error" => "not found"}
+    end
+
+    test "sets appropriate observability metadata", %{conn: conn, tenant: tenant} do
+      external_id = tenant.external_id
+
+      # opentelemetry_phoenix expects to be a child of the originating cowboy process hence the Task here :shrug:
+      Tracer.with_span "test" do
+        Task.async(fn ->
+          get(conn, ~p"/api/tenants/#{external_id}")
+
+          assert Logger.metadata()[:external_id] == external_id
+          assert Logger.metadata()[:project] == external_id
+        end)
+        |> Task.await()
       end
+
+      assert_receive {:span, span(name: "GET /api/tenants/:tenant_id", attributes: attributes)}
+
+      assert attributes(map: %{external_id: ^external_id}) = attributes
+    end
+  end
+
+  describe "create tenant with post" do
+    test "run migrations on creation and encrypts credentials", %{conn: conn} do
+      external_id = random_string()
+      {:ok, port} = Containers.checkout()
+
+      assert nil == Tenants.get_tenant_by_external_id(external_id)
+
+      attrs = default_tenant_attrs(port)
+      attrs = Map.put(attrs, "external_id", external_id)
+
+      conn = post(conn, ~p"/api/tenants", tenant: attrs)
+
+      assert %{"id" => _id, "external_id" => ^external_id} = json_response(conn, 201)["data"]
+
+      [%{"settings" => settings}] = json_response(conn, 201)["data"]["extensions"]
+
+      assert Crypto.encrypt!("127.0.0.1") == settings["db_host"]
+      assert Crypto.encrypt!("postgres") == settings["db_name"]
+      assert Crypto.encrypt!("tealbase_admin") == settings["db_user"]
+      refute settings["db_password"]
+
+      %{extensions: [%{settings: settings}]} = tenant = Tenants.get_tenant_by_external_id(external_id)
+
+      assert Crypto.encrypt!("postgres") == settings["db_password"]
+      assert tenant.migrations_ran > 0
+    end
+  end
+
+  describe "create tenant with put" do
+    test "run migrations on creation and encrypts credentials", %{conn: conn} do
+      external_id = random_string()
+      {:ok, port} = Containers.checkout()
+
+      assert nil == Tenants.get_tenant_by_external_id(external_id)
+
+      attrs = default_tenant_attrs(port)
+
+      conn = put(conn, ~p"/api/tenants/#{external_id}", tenant: attrs)
+
+      assert %{"id" => _id, "external_id" => ^external_id} = json_response(conn, 201)["data"]
+      [%{"settings" => settings}] = json_response(conn, 201)["data"]["extensions"]
+
+      assert Crypto.encrypt!("127.0.0.1") == settings["db_host"]
+      assert Crypto.encrypt!("postgres") == settings["db_name"]
+      assert Crypto.encrypt!("tealbase_admin") == settings["db_user"]
+      refute settings["db_password"]
+
+      %{extensions: [%{settings: settings}]} = tenant = Tenants.get_tenant_by_external_id(external_id)
+
+      assert Crypto.encrypt!("postgres") == settings["db_password"]
+      assert tenant.migrations_ran > 0
+    end
+  end
+
+  describe "upsert with post" do
+    setup [:with_tenant]
+
+    test "renders tenant when data is valid", %{conn: conn, tenant: tenant} do
+      external_id = tenant.external_id
+      port = Database.from_tenant(tenant, "realtime_test", :stop).port
+      attrs = default_tenant_attrs(port)
+      attrs = Map.put(attrs, "external_id", external_id)
+      conn = post(conn, ~p"/api/tenants", tenant: attrs)
+      assert %{"id" => _id, "external_id" => ^external_id} = json_response(conn, 200)["data"]
+
+      conn = get(conn, Routes.tenant_path(conn, :show, external_id))
+      assert ^external_id = json_response(conn, 200)["data"]["external_id"]
+      assert 200 = json_response(conn, 200)["data"]["max_concurrent_users"]
+      assert 100 = json_response(conn, 200)["data"]["max_channels_per_client"]
+      assert 100 = json_response(conn, 200)["data"]["max_events_per_second"]
+      assert 100 = json_response(conn, 200)["data"]["max_joins_per_second"]
     end
 
     test "renders errors when data is invalid", %{conn: conn} do
-      with_mock JwtVerification, verify: fn _token, _secret -> {:ok, %{}} end do
-        conn = post(conn, Routes.tenant_path(conn, :create), tenant: @invalid_attrs)
-        assert json_response(conn, 422)["errors"] != %{}
-      end
+      conn = post(conn, ~p"/api/tenants", tenant: @invalid_attrs)
+      assert json_response(conn, 422)["errors"] != %{}
+    end
+
+    test "returns 403 when jwt is invalid", %{conn: conn} do
+      conn = put_req_header(conn, "authorization", "Bearer potato")
+      conn = post(conn, ~p"/api/tenants", tenant: default_tenant_attrs(5000))
+      assert response(conn, 403)
     end
   end
 
-  describe "update tenant" do
-    setup [:create_tenant]
+  describe "upsert with put" do
+    setup [:with_tenant]
 
-    test "renders tenant when data is valid", %{
-      conn: conn,
-      tenant: %Tenant{id: id, external_id: ext_id} = _tenant
-    } do
-      with_mock JwtVerification, verify: fn _token, _secret -> {:ok, %{}} end do
-        conn = put(conn, Routes.tenant_path(conn, :update, ext_id), tenant: @update_attrs)
-        assert %{"id" => ^id, "external_id" => ^ext_id} = json_response(conn, 200)["data"]
-        conn = get(conn, Routes.tenant_path(conn, :show, ext_id))
-        assert "some updated name" = json_response(conn, 200)["data"]["name"]
-        assert 200 = json_response(conn, 200)["data"]["max_concurrent_users"]
-      end
+    test "renders tenant when data is valid", %{tenant: tenant, conn: conn} do
+      external_id = tenant.external_id
+      port = Database.from_tenant(tenant, "realtime_test", :stop).port
+      attrs = default_tenant_attrs(port)
+
+      conn = put(conn, ~p"/api/tenants/#{external_id}", tenant: attrs)
+      assert %{"id" => _id, "external_id" => ^external_id} = json_response(conn, 200)["data"]
+
+      conn = get(conn, Routes.tenant_path(conn, :show, external_id))
+      assert ^external_id = json_response(conn, 200)["data"]["external_id"]
+      assert 200 = json_response(conn, 200)["data"]["max_concurrent_users"]
+      assert 100 = json_response(conn, 200)["data"]["max_channels_per_client"]
+      assert 100 = json_response(conn, 200)["data"]["max_events_per_second"]
+      assert 100 = json_response(conn, 200)["data"]["max_joins_per_second"]
     end
 
-    test "renders errors when data is invalid", %{conn: conn, tenant: tenant} do
-      with_mock JwtVerification, verify: fn _token, _secret -> {:ok, %{}} end do
-        conn =
-          put(conn, Routes.tenant_path(conn, :update, tenant.external_id), tenant: @invalid_attrs)
+    test "renders errors when data is invalid", %{conn: conn} do
+      conn = put(conn, ~p"/api/tenants/#{random_string()}", tenant: @invalid_attrs)
+      assert json_response(conn, 422)["errors"] != %{}
+    end
 
-        assert json_response(conn, 422)["errors"] != %{}
+    test "returns 403 when jwt is invalid", %{conn: conn} do
+      conn = put_req_header(conn, "authorization", "Bearer potato")
+      conn = put(conn, ~p"/api/tenants/external_id", tenant: default_tenant_attrs(5000))
+      assert response(conn, 403)
+    end
+
+    test "sets appropriate observability metadata", %{conn: conn, tenant: tenant} do
+      external_id = tenant.external_id
+      port = Database.from_tenant(tenant, "realtime_test", :stop).port
+      attrs = default_tenant_attrs(port)
+
+      # opentelemetry_phoenix expects to be a child of the originating cowboy process hence the Task here :shrug:
+      Tracer.with_span "test" do
+        Task.async(fn ->
+          put(conn, ~p"/api/tenants/#{external_id}", tenant: attrs)
+
+          assert Logger.metadata()[:external_id] == external_id
+          assert Logger.metadata()[:project] == external_id
+        end)
+        |> Task.await()
       end
+
+      assert_receive {:span, span(name: "PUT /api/tenants/:tenant_id", attributes: attributes)}
+
+      assert attributes(map: %{external_id: ^external_id}) = attributes
     end
   end
 
   describe "delete tenant" do
-    setup [:create_tenant]
+    setup [:with_tenant]
 
     test "deletes chosen tenant", %{conn: conn, tenant: tenant} do
-      with_mock JwtVerification, verify: fn _token, _secret -> {:ok, %{}} end do
-        conn = delete(conn, Routes.tenant_path(conn, :delete, tenant.external_id))
-        assert response(conn, 204)
-        conn = get(conn, Routes.tenant_path(conn, :show, tenant.external_id))
-        assert response(conn, 404)
-      end
+      {:ok, _pid} = Connect.lookup_or_start_connection(tenant.external_id)
+      assert Connect.ready?(tenant.external_id)
+
+      assert Cache.get_tenant_by_external_id(tenant.external_id)
+      {:ok, db_conn} = Database.connect(tenant, "realtime_test", :stop)
+
+      %{rows: [rows]} =
+        Postgrex.query!(db_conn, "SELECT slot_name FROM pg_replication_slots", [])
+
+      assert rows > 0
+      conn = delete(conn, ~p"/api/tenants/#{tenant.external_id}")
+      assert response(conn, 204)
+
+      refute Cache.get_tenant_by_external_id(tenant.external_id)
+      refute Tenants.get_tenant_by_external_id(tenant.external_id)
+      Process.sleep(500)
+
+      assert {:ok, %{rows: []}} =
+               Postgrex.query(db_conn, "SELECT slot_name FROM pg_replication_slots", [])
     end
 
     test "tenant doesn't exist", %{conn: conn} do
-      with_mock JwtVerification, verify: fn _token, _secret -> {:ok, %{}} end do
-        conn = delete(conn, Routes.tenant_path(conn, :delete, "wrong_external_id"))
-        assert response(conn, 204)
+      conn = delete(conn, ~p"/api/tenants/nope")
+      assert response(conn, 204)
+    end
+
+    test "returns 403 when jwt is invalid", %{conn: conn, tenant: tenant} do
+      conn = put_req_header(conn, "authorization", "Bearer potato")
+      conn = delete(conn, ~p"/api/tenants/#{tenant.external_id}")
+      assert response(conn, 403) == ""
+    end
+
+    test "sets appropriate observability metadata", %{conn: conn, tenant: tenant} do
+      external_id = tenant.external_id
+
+      # opentelemetry_phoenix expects to be a child of the originating cowboy process hence the Task here :shrug:
+      Tracer.with_span "test" do
+        Task.async(fn ->
+          delete(conn, ~p"/api/tenants/#{external_id}")
+
+          assert Logger.metadata()[:external_id] == external_id
+          assert Logger.metadata()[:project] == external_id
+        end)
+        |> Task.await()
       end
+
+      assert_receive {:span, span(name: "DELETE /api/tenants/:tenant_id", attributes: attributes)}
+
+      assert attributes(map: %{external_id: ^external_id}) = attributes
     end
   end
 
   describe "reload tenant" do
-    test "reload when tenant does exist", %{conn: conn} do
-      with_mocks [
-        {ChannelsAuthorization, [], authorize: fn _, _ -> {:ok, %{}} end},
-        {Api, [], get_tenant_by_external_id: fn _ -> %Tenant{} end}
-      ] do
-        Routes.tenant_reload_path(conn, :reload, @external_id)
-        %{status: status} = post(conn, Routes.tenant_reload_path(conn, :reload, @external_id))
-        assert status == 204
-      end
+    setup [:with_tenant]
+
+    test "reload when tenant does exist", %{conn: conn, tenant: tenant} do
+      %{status: status} = post(conn, ~p"/api/tenants/#{tenant.external_id}/reload")
+      assert status == 204
     end
 
     test "reload when tenant does not exist", %{conn: conn} do
-      with_mock ChannelsAuthorization, authorize: fn _, _ -> {:ok, %{}} end do
-        Routes.tenant_reload_path(conn, :reload, @external_id)
-        %{status: status} = post(conn, Routes.tenant_reload_path(conn, :reload, @external_id))
-        assert status == 404
+      %{status: status} = post(conn, ~p"/api/tenants/nope/reload")
+      assert status == 404
+    end
+
+    test "returns 403 when jwt is invalid", %{conn: conn, tenant: tenant} do
+      conn = put_req_header(conn, "authorization", "Bearer potato")
+      conn = post(conn, ~p"/api/tenants/#{tenant.external_id}/reload")
+      assert response(conn, 403) == ""
+    end
+
+    test "sets appropriate observability metadata", %{conn: conn, tenant: tenant} do
+      external_id = tenant.external_id
+
+      # opentelemetry_phoenix expects to be a child of the originating cowboy process hence the Task here :shrug:
+      Tracer.with_span "test" do
+        Task.async(fn ->
+          post(conn, ~p"/api/tenants/#{tenant.external_id}/reload")
+
+          assert Logger.metadata()[:external_id] == external_id
+          assert Logger.metadata()[:project] == external_id
+        end)
+        |> Task.await()
       end
+
+      assert_receive {:span, span(name: "POST /api/tenants/:tenant_id/reload", attributes: attributes)}
+
+      assert attributes(map: %{external_id: ^external_id}) = attributes
     end
   end
 
-  defp create_tenant(_) do
-    tenant = fixture(:tenant)
-    %{tenant: tenant}
+  describe "health check tenant" do
+    setup [:with_tenant]
+
+    setup do
+      Application.put_env(:realtime, :region, "us-east-1")
+      on_exit(fn -> Application.put_env(:realtime, :region, nil) end)
+    end
+
+    test "health check when tenant does not exist", %{conn: conn} do
+      %{status: status} = get(conn, ~p"/api/tenants/nope/health")
+      assert status == 404
+    end
+
+    test "healthy tenant with 0 client connections", %{
+      conn: conn,
+      tenant: %Tenant{external_id: external_id}
+    } do
+      conn = get(conn, ~p"/api/tenants/#{external_id}/health")
+      data = json_response(conn, 200)["data"]
+      Connect.shutdown(external_id)
+
+      assert %{
+               "healthy" => true,
+               "db_connected" => false,
+               "connected_cluster" => 0,
+               "region" => "us-east-1",
+               "node" => "#{node()}"
+             } == data
+    end
+
+    test "unhealthy tenant with 1 client connections", %{
+      conn: conn,
+      tenant: %Tenant{external_id: ext_id}
+    } do
+      # Fake adding a connected client here
+      # No connection to the tenant database
+      UsersCounter.add(self(), ext_id)
+
+      conn = get(conn, ~p"/api/tenants/#{ext_id}/health")
+      data = json_response(conn, 200)["data"]
+
+      assert %{
+               "healthy" => false,
+               "db_connected" => false,
+               "connected_cluster" => 1,
+               "region" => "us-east-1",
+               "node" => "#{node()}"
+             } == data
+    end
+
+    test "healthy tenant with 1 client connection", %{
+      conn: conn,
+      tenant: %Tenant{external_id: ext_id}
+    } do
+      {:ok, db_conn} = Connect.lookup_or_start_connection(ext_id)
+      # Fake adding a connected client here
+      UsersCounter.add(self(), ext_id)
+
+      # Fake a db connection
+      :syn.register(Realtime.Tenants.Connect, ext_id, self(), %{conn: nil})
+
+      :syn.update_registry(Realtime.Tenants.Connect, ext_id, fn _pid, meta ->
+        %{meta | conn: db_conn}
+      end)
+
+      conn = get(conn, ~p"/api/tenants/#{ext_id}/health")
+      data = json_response(conn, 200)["data"]
+
+      assert %{
+               "healthy" => true,
+               "db_connected" => true,
+               "connected_cluster" => 1,
+               "region" => "us-east-1",
+               "node" => "#{node()}"
+             } == data
+    end
+
+    test "returns 403 when jwt is invalid", %{conn: conn, tenant: tenant} do
+      conn = put_req_header(conn, "authorization", "Bearer potato")
+      conn = get(conn, ~p"/api/tenants/#{tenant.external_id}/health")
+      assert response(conn, 403) == ""
+    end
+
+    test "runs migrations", %{conn: conn} do
+      tenant = Containers.checkout_tenant(run_migrations: false)
+
+      {:ok, db_conn} = Database.connect(tenant, "realtime_test", :stop)
+      assert {:error, _} = Postgrex.query(db_conn, "SELECT * FROM realtime.messages", [])
+
+      conn = get(conn, ~p"/api/tenants/#{tenant.external_id}/health")
+      data = json_response(conn, 200)["data"]
+      Process.sleep(2000)
+
+      assert {:ok, %{rows: []}} = Postgrex.query(db_conn, "SELECT * FROM realtime.messages", [])
+
+      assert %{"healthy" => true, "db_connected" => false, "connected_cluster" => 0} = data
+    end
+
+    test "sets appropriate observability metadata", %{conn: conn, tenant: tenant} do
+      external_id = tenant.external_id
+      # opentelemetry_phoenix expects to be a child of the originating cowboy process hence the Task here :shrug:
+      Tracer.with_span "test" do
+        Task.async(fn ->
+          get(conn, ~p"/api/tenants/#{tenant.external_id}/health")
+
+          assert Logger.metadata()[:external_id] == external_id
+          assert Logger.metadata()[:project] == external_id
+        end)
+        |> Task.await()
+      end
+
+      assert_receive {:span, span(name: "GET /api/tenants/:tenant_id/health", attributes: attributes)}
+
+      assert attributes(map: %{external_id: ^external_id}) = attributes
+    end
+  end
+
+  defp default_tenant_attrs(port) do
+    %{
+      "extensions" => [
+        %{
+          "type" => "postgres_cdc_rls",
+          "settings" => %{
+            "db_host" => "127.0.0.1",
+            "db_name" => "postgres",
+            "db_user" => "tealbase_admin",
+            "db_password" => "postgres",
+            "db_port" => "#{port}",
+            "poll_interval" => 100,
+            "poll_max_changes" => 100,
+            "poll_max_record_bytes" => 1_048_576,
+            "region" => "us-east-1",
+            "ssl_enforced" => false
+          }
+        }
+      ],
+      "postgres_cdc_default" => "postgres_cdc_rls",
+      "jwt_secret" => "new secret"
+    }
   end
 end
